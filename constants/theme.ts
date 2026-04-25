@@ -1,29 +1,49 @@
-/**
- * Below are the colors that are used in the app. The colors are defined in the light and dark mode.
- * There are many other ways to style your app. For example, [Nativewind](https://www.nativewind.dev/), [Tamagui](https://tamagui.dev/), [unistyles](https://reactnativeunistyles.vercel.app), etc.
- */
-
+import { DarkTheme } from '@react-navigation/native';
 import { Platform } from 'react-native';
 
-const tintColorLight = '#0a7ea4';
-const tintColorDark = '#fff';
-
-export const Colors = {
-  light: {
-    text: '#11181C',
-    background: '#fff',
-    tint: tintColorLight,
-    icon: '#687076',
-    tabIconDefault: '#687076',
-    tabIconSelected: tintColorLight,
+export const servmorxTheme = {
+  colors: {
+    background: '#050B14',
+    surface: '#0D1624',
+    surfaceElevated: '#121E30',
+    border: '#203349',
+    accent: '#12D7C0',
+    accentPressed: '#0FB5A1',
+    accentSoft: 'rgba(18, 215, 192, 0.14)',
+    text: '#F7FAFF',
+    textMuted: '#9FB2CC',
+    textDim: '#6F83A0',
+    success: '#1BC98E',
+    warning: '#F3A64B',
+    danger: '#FF6B6B',
+    shadow: 'rgba(0, 0, 0, 0.24)',
   },
-  dark: {
-    text: '#ECEDEE',
-    background: '#151718',
-    tint: tintColorDark,
-    icon: '#9BA1A6',
-    tabIconDefault: '#9BA1A6',
-    tabIconSelected: tintColorDark,
+  spacing: {
+    xs: 6,
+    sm: 10,
+    md: 16,
+    lg: 20,
+    xl: 24,
+    xxl: 32,
+  },
+  radius: {
+    sm: 12,
+    md: 18,
+    lg: 24,
+    pill: 999,
+  },
+};
+
+export const navigationDarkTheme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    primary: servmorxTheme.colors.accent,
+    background: servmorxTheme.colors.background,
+    card: servmorxTheme.colors.surface,
+    text: servmorxTheme.colors.text,
+    border: servmorxTheme.colors.border,
+    notification: servmorxTheme.colors.accent,
   },
 };
 
@@ -51,3 +71,7 @@ export const Fonts = Platform.select({
     mono: "SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
   },
 });
+
+export const layout = {
+  screenMaxWidth: 440,
+};

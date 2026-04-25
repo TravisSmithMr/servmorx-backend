@@ -28,6 +28,13 @@
     "plugins": [
       "expo-router",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow SERVMORX TECH to select equipment tag photos for extraction.",
+          "cameraPermission": "Allow SERVMORX TECH to capture equipment tag photos for extraction."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
