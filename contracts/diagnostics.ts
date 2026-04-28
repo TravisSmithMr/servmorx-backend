@@ -1,6 +1,5 @@
 import type {
   AnalyticsSummary,
-  CopilotInsight,
   DiagnosticCause,
   ResultConfidenceLevel,
 } from '@/types/diagnostic';
@@ -15,8 +14,11 @@ export interface DiagnosticsEquipmentContext {
 
 export interface DiagnosticsContextPayload {
   issue: string | null;
+  stage?: string | null;
   route: string | null;
   equipment: DiagnosticsEquipmentContext;
+  followUpAnswers?: Record<string, unknown>;
+  techNotes?: string[];
   gateAnswers: Record<string, unknown>;
   diagAnswers: Record<string, unknown>;
   likelyCauses: DiagnosticCause[];
@@ -35,9 +37,10 @@ export interface DiagnosticsCopilotRequest {
 
 export interface DiagnosticsCopilotResponse {
   provider: string;
-  insight: CopilotInsight;
+  insight: string;
   quickPrompts: string[];
   messageText: string;
+  error?: boolean;
 }
 
 export interface DiagnosticsAnalyzeSystemRequest {

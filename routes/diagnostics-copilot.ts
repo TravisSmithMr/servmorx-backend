@@ -1,40 +1,8 @@
 import type {
-  DiagnosticsContextPayload,
   DiagnosticsCopilotRequest,
   DiagnosticsCopilotResponse,
 } from '@/backend/contracts/diagnostics';
 import { createServerTextResponse } from '@/backend/lib/openai-server-client';
-import { localCopilotProvider } from '@/features/copilot/providers/local-copilot-provider';
-import type { DiagnosticRouteId } from '@/types/diagnostic';
-
-function buildFallbackContext(context: DiagnosticsContextPayload) {
-  return {
-    hash: JSON.stringify(context),
-    issue: context.issue,
-    route: context.route,
-    equipment: context.equipment,
-    gateAnswers: context.gateAnswers,
-    diagAnswers: context.diagAnswers,
-    likelyCauses: context.likelyCauses,
-    routeConfidence: context.routeConfidence,
-    resultConfidence: context.resultConfidence,
-    routeReasons: context.routeReasons,
-    contradictions: context.contradictions,
-    missingDataFlags: context.missingDataFlags,
-    analytics: context.analytics,
-    result:
-      context.route && context.likelyCauses.length > 0
-        ? {
-            route: context.route as DiagnosticRouteId,
-            summary: context.routeReasons[0] ?? 'Structured route selected.',
-            routeReasons: context.routeReasons,
-            confidenceLevel: context.resultConfidence ?? 'medium',
-            likelyCauses: context.likelyCauses,
-            nextChecks: context.likelyCauses.map((cause) => cause.nextCheck),
-          }
-        : null,
-  };
-}
 
 function extractJsonObject(rawText: string) {
   const firstBrace = rawText.indexOf('{');
@@ -48,42 +16,70 @@ function extractJsonObject(rawText: string) {
 }
 
 function buildCopilotPrompt(request: DiagnosticsCopilotRequest) {
+  const issue = request.context?.issue ?? 'unknown';
+  const equipment = request.context?.equipment ?? null;
+  const followUpAnswers = 'followUpAnswers' in request.context ? request.context.followUpAnswers : {};
+  const techNotes = 'techNotes' in request.context ? request.context.techNotes : [];
+
   return [
-    'You are an HVAC diagnostic copilot assisting a field technician.',
-    'Use the structured route as source of truth. Do not override it.',
+    'You are SERVMORX TECH, an AI HVAC diagnostic copilot assisting a field technician.',
+    'All reasoning must come from the supplied diagnostic context. Do not invent readings.',
+    'Sound like an experienced field tech: practical, specific, confident but not absolute.',
+    'Explain what the evidence points toward and what to check next.',
+    'Keep messageText to 2-4 short sentences. No paragraphs. No filler.',
+    'Avoid generic language: "it depends", "various factors", "could be anything", "several things".',
+    'Use grounded language: "points toward", "likely", "worth checking next".',
     'Return strict JSON with keys: provider, insight, quickPrompts, messageText.',
-    'insight must include summary, direction, followUpQuestion, nextBestTests.',
-    'Tone: professional, concise, experienced-tech level.',
+    'provider must be exactly "openai".',
+    'insight must be a short string the app can display.',
+    'quickPrompts should be 0-3 short field checks, not generic chat suggestions.',
     '',
     `User message: ${request.message ?? 'Passive update only.'}`,
+    `Issue: ${issue}`,
+    `Equipment: ${JSON.stringify(equipment)}`,
+    `Follow-up answers: ${JSON.stringify(followUpAnswers)}`,
+    `Tech notes: ${JSON.stringify(techNotes)}`,
     '',
     'Diagnostic context JSON:',
     JSON.stringify(request.context, null, 2),
+    '',
+    'If analytics.symptoms exists, treat those boolean symptom fields as normalized technician observations.',
   ].join('\n');
 }
 
 export async function handleDiagnosticsCopilot(
   request: DiagnosticsCopilotRequest
 ): Promise<DiagnosticsCopilotResponse> {
+  console.log('[diagnostics/copilot] route hit');
+  console.log('[diagnostics/copilot] request body:', JSON.stringify(request));
+  console.log(
+    `[diagnostics/copilot] OPENAI_API_KEY exists: ${Boolean(process.env.OPENAI_API_KEY?.trim())}`
+  );
+
   try {
     const rawText = await createServerTextResponse(buildCopilotPrompt(request));
     const parsed = extractJsonObject(rawText);
+    console.log('[diagnostics/copilot] OpenAI response success');
 
     return {
       ...parsed,
-      provider: parsed.provider || 'openai_backend',
+      provider: 'openai',
+      insight: typeof parsed.insight === 'string' ? parsed.insight : '',
+      quickPrompts: Array.isArray(parsed.quickPrompts) ? parsed.quickPrompts : [],
+      messageText:
+        typeof parsed.messageText === 'string'
+          ? parsed.messageText
+          : 'Backend AI returned no reasoning text.',
     };
-  } catch {
-    const fallbackContext = buildFallbackContext(request.context);
-    const response = request.message
-      ? localCopilotProvider.buildReply(fallbackContext, request.message)
-      : localCopilotProvider.buildAutoResponse(fallbackContext);
+  } catch (error) {
+    console.error('[diagnostics/copilot] OpenAI response failure:', error);
 
     return {
-      provider: 'backend_local_fallback',
-      insight: response.insight,
-      quickPrompts: response.quickPrompts,
-      messageText: response.messageText,
+      provider: 'backend',
+      error: true,
+      insight: '',
+      quickPrompts: [],
+      messageText: 'AI request failed',
     };
   }
 }
