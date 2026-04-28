@@ -74,7 +74,7 @@ async function createCopilotAiResponse(payload) {
   const rawJson = await createServerJsonResponse(buildCopilotPrompt(context));
   console.log("[diagnostics/copilot] AI response JSON:", JSON.stringify(rawJson));
   logMissingFields(rawJson);
-  return normalizeCopilotResponse(rawJson);
+  return normalizeCopilotResponse(rawJson, context);
 }
 
 async function createServerJsonResponse(prompt) {
@@ -157,17 +157,22 @@ function buildContextBlock(context) {
     : [];
   const askedQuestions = Array.isArray(context?.askedQuestions) ? context.askedQuestions : [];
   const answeredQuestions = context?.answeredQuestions || {};
+  const candidateQuestions = Array.isArray(context?.candidateQuestions)
+    ? context.candidateQuestions
+    : [];
   const currentQuestionId = context?.currentQuestionId || null;
   const measurementValues = context?.measurementValues || {};
   const currentConfidence =
     typeof context?.currentConfidence === "number" ? context.currentConfidence : null;
   const likelyPath = context?.likelyPath || "unknown";
   const currentStage = context?.currentStage || context?.stage || "unknown";
+  const diagnosticStage = context?.diagnosticStage || "initial";
   const latestMessage = context?.latestTechnicianMessage || "none";
 
   return [
     "CONTEXT",
-    `Current stage: ${currentStage}`,
+    `UI screen: ${currentStage}`,
+    `Diagnostic stage: ${diagnosticStage}`,
     `Issue: ${issue}`,
     `Equipment: ${JSON.stringify(equipment)}`,
     `Follow-up answers: ${JSON.stringify(followUpAnswers)}`,
@@ -179,6 +184,7 @@ function buildContextBlock(context) {
     `Previous questions asked: ${JSON.stringify(previousQuestionsAsked)}`,
     `Asked question ids: ${JSON.stringify(askedQuestions)}`,
     `Answered questions: ${JSON.stringify(answeredQuestions)}`,
+    `Candidate questions for this stage: ${JSON.stringify(candidateQuestions)}`,
     `Current question id: ${JSON.stringify(currentQuestionId)}`,
     `Measurement values: ${JSON.stringify(measurementValues)}`,
     `Latest technician message: ${latestMessage}`
@@ -188,6 +194,10 @@ function buildContextBlock(context) {
 function buildDiagnosticRules() {
   return [
     "DIAGNOSTIC RULES",
+    "- This is a diagnostic state machine, not a chatbot.",
+    "- The app controls stage progression. You interpret evidence and choose/prioritize one candidate question inside the current diagnostic stage.",
+    "- Prefer nextQuestionId from Candidate questions for this stage. If none fit, return null and suggest the next stage.",
+    "- Never repeat a question id already present in Answered questions or Asked question ids.",
     "- Do not assume refrigerant issues without pressure/temperature evidence.",
     "- Separate airflow vs electrical vs refrigeration first.",
     "- No cooling + fan only does not automatically mean bad compressor.",
@@ -214,8 +224,9 @@ function buildTaskInstruction() {
   return [
     "TASK INSTRUCTION",
     "Based on this information:",
-    "- choose the single most useful next diagnostic question from the actual context",
-    "- decide whether there is enough confirmed evidence to name a likely cause",
+    "- interpret the latest answer against the current diagnostic stage",
+    "- choose the single most useful next diagnostic question from Candidate questions for this stage",
+    "- suggest a stage only if the current stage has enough evidence or no useful candidates remain",
     "- if evidence is insufficient, say so and ask the single next best diagnostic question",
     "- if evidence is medium confidence, describe the likely path and ask one confirming question",
     "- if evidence is high confidence, give the likely cause and the next confirming check",
@@ -232,38 +243,47 @@ function buildOutputFormat() {
     "Return structured JSON only:",
     "{",
     '  "messageText": string,',
+    '  "interpretation": string,',
+    '  "nextQuestionId": "indoor_blower_status" | "outdoor_unit_status" | "compressor_status" | "condenser_fan_status" | "suction_pressure" | "head_pressure" | "outdoor_ambient" | "superheat" | "subcooling" | "coil_frozen" | "airflow_status" | "filter_status" | "vent_distribution" | "freeze_location" | "run_time" | "other_detail" | null,',
+    '  "nextQuestion": string | null,',
     '  "confidence": number,',
+    '  "suggestedStage": "initial" | "operation_check" | "airflow_check" | "electrical_check" | "refrigeration_check" | "verification" | "diagnosis",',
     '  "likelyPath": string,',
     '  "nextBestQuestion": string | null,',
-    '  "nextQuestionId": "indoor_blower_status" | "outdoor_unit_status" | "compressor_status" | "condenser_fan_status" | "suction_pressure" | "head_pressure" | "outdoor_ambient" | "superheat" | "subcooling" | "coil_frozen" | "airflow_status" | "filter_status" | "vent_distribution" | "freeze_location" | "run_time" | "other_detail" | null,',
     '  "answerType": "singleChoice" | "yesNo" | "numeric" | "freeText" | "groupedMeasurementSet",',
     '  "answerOptions": string[],',
     '  "missingInfo": string[],',
     '  "stopAndDiagnose": boolean',
     "}",
     "confidence must be 0-100 based only on confirmed evidence.",
+    "suggestedStage must be the current stage unless enough evidence supports moving forward.",
     "If confidence is below 45, messageText must not name a likely failed part. It should say: Not enough confirmed data yet. Based on what we know, I'd check ___ next.",
-    "answerOptions must directly answer nextBestQuestion. Use [] for freeText or numeric unless short choices are useful."
+    "nextQuestion must match nextQuestionId and answerOptions must directly answer nextQuestion. Use [] for freeText or numeric unless short choices are useful."
   ].join("\n");
 }
 
-function normalizeCopilotResponse(parsed) {
+function normalizeCopilotResponse(parsed, context = {}) {
   const rawMessageText =
     typeof parsed.messageText === "string" ? parsed.messageText : "";
+  const nextQuestion =
+    typeof parsed.nextQuestion === "string"
+      ? parsed.nextQuestion
+      : typeof parsed.nextBestQuestion === "string"
+        ? parsed.nextBestQuestion
+        : typeof parsed.followUpQuestion === "string"
+          ? parsed.followUpQuestion
+          : null;
+  const nextQuestionId = normalizeQuestionId(parsed.nextQuestionId);
+  const candidateQuestion = findCandidateQuestion(context, nextQuestionId);
   const nextBestCheck =
     typeof parsed.nextStep === "string"
       ? parsed.nextStep
       : typeof parsed.nextBestCheck === "string"
         ? parsed.nextBestCheck
-        : typeof parsed.nextBestQuestion === "string"
-          ? parsed.nextBestQuestion
+        : nextQuestion
+          ? nextQuestion
           : "Confirm the next live field measurement before ranking causes.";
-  const followUpQuestion =
-    typeof parsed.nextBestQuestion === "string"
-      ? parsed.nextBestQuestion
-      : typeof parsed.followUpQuestion === "string"
-        ? parsed.followUpQuestion
-        : null;
+  const followUpQuestion = nextQuestion;
   const confidence = clampConfidence(parsed.confidence);
   const messageText =
     confidence < 45
@@ -277,24 +297,33 @@ function normalizeCopilotResponse(parsed) {
       : [];
   const answerOptions = Array.isArray(parsed.answerOptions)
     ? parsed.answerOptions.slice(0, 6).map(String)
-    : [];
+    : Array.isArray(candidateQuestion?.answerOptions)
+      ? candidateQuestion.answerOptions.slice(0, 6).map(String)
+      : [];
+  const answerType = normalizeAnswerType(parsed.answerType || candidateQuestion?.answerType);
+  const interpretation =
+    typeof parsed.interpretation === "string" ? parsed.interpretation : messageText;
+  const suggestedStage = normalizeDiagnosticStage(parsed.suggestedStage);
 
   return {
     provider: "openai",
     insight: typeof parsed.insight === "string" ? parsed.insight : messageText,
     quickPrompts: answerOptions,
     messageText,
-    reasoningSummary: messageText,
+    interpretation,
+    reasoningSummary: interpretation,
+    nextQuestion: followUpQuestion || "",
     nextBestQuestion: followUpQuestion || "",
-    nextQuestionId: normalizeQuestionId(parsed.nextQuestionId),
+    nextQuestionId,
     followUpQuestion,
     likelyPath: typeof parsed.likelyPath === "string" ? parsed.likelyPath : "",
-    answerType: normalizeAnswerType(parsed.answerType),
+    answerType,
     answerOptions,
     missingInfo,
     nextBestCheck,
     nextStep: nextBestCheck,
     confidence,
+    suggestedStage,
     cautions: [],
     stopAndDiagnose: parsed.stopAndDiagnose === true,
     diagnosisResult: buildDiagnosisAdapter(
@@ -342,6 +371,28 @@ function normalizeAnswerType(value) {
   }
 
   return "freeText";
+}
+
+function normalizeDiagnosticStage(value) {
+  const knownStages = [
+    "initial",
+    "operation_check",
+    "airflow_check",
+    "electrical_check",
+    "refrigeration_check",
+    "verification",
+    "diagnosis"
+  ];
+
+  return knownStages.includes(value) ? value : undefined;
+}
+
+function findCandidateQuestion(context, questionId) {
+  if (!questionId || !Array.isArray(context?.candidateQuestions)) {
+    return undefined;
+  }
+
+  return context.candidateQuestions.find((question) => question.questionId === questionId);
 }
 
 function buildDiagnosisAdapter(parsed, messageText, nextStep, followUpQuestion, missingInfo) {
@@ -426,13 +477,11 @@ function clampConfidence(value) {
 function logMissingFields(response) {
   const missing = [
     "messageText",
+    "interpretation",
     "confidence",
-    "nextBestQuestion",
     "nextQuestionId",
-    "answerType",
-    "answerOptions",
-    "missingInfo",
-    "stopAndDiagnose"
+    "nextQuestion",
+    "suggestedStage"
   ].filter((field) => response[field] === undefined);
 
   if (missing.length > 0) {

@@ -17,6 +17,20 @@ export interface DiagnosticsContextPayload {
   selectedIssue?: string | null;
   stage?: string | null;
   currentStage?: string | null;
+  diagnosticStage?:
+    | 'initial'
+    | 'operation_check'
+    | 'airflow_check'
+    | 'electrical_check'
+    | 'refrigeration_check'
+    | 'verification'
+    | 'diagnosis';
+  candidateQuestions?: Array<{
+    questionId: string;
+    question: string;
+    answerType: string;
+    answerOptions: string[];
+  }>;
   latestTechnicianMessage?: string | null;
   currentConfidence?: number | null;
   likelyPath?: string | null;
@@ -54,7 +68,9 @@ export interface DiagnosticsCopilotResponse {
   insight: string;
   quickPrompts: string[];
   messageText: string;
+  interpretation?: string;
   reasoningSummary?: string;
+  nextQuestion?: string | null;
   nextBestQuestion?: string;
   nextQuestionId?: string;
   nextBestCheck?: string;
@@ -65,6 +81,7 @@ export interface DiagnosticsCopilotResponse {
   answerOptions?: string[];
   missingInfo?: string[];
   confidence?: number;
+  suggestedStage?: string;
   cautions?: string[];
   stopAndDiagnose?: boolean;
   diagnosisResult?: {
