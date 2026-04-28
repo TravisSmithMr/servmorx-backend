@@ -220,7 +220,7 @@ async function createServerVisionOcrResponse(image) {
 
 function parseEquipmentIdentity(rawText) {
   const text = typeof rawText === "string" ? rawText : "";
-  const normalized = text.replace(/\r/g, "\n");
+  const normalized = normalizeOcrText(text);
   const lines = normalized
     .split("\n")
     .map((line) => line.trim())
@@ -241,8 +241,34 @@ function parseEquipmentIdentity(rawText) {
     "s/n"
   ]);
   const unitType = extractUnitType(normalized);
-  const presentFields = [brand, modelNumber, serialNumber, unitType].filter(Boolean).length;
-  const confidence = Math.max(0.1, Math.min(0.95, presentFields / 4));
+  const build = estimateBuildDate(serialNumber, normalized);
+  const refrigeration = extractRefrigeration(normalized);
+  const electrical = extractElectrical(normalized);
+  const warrantyEstimate = build.year
+    ? {
+        fiveYearDate: `${build.year + 5}`,
+        tenYearDate: `${build.year + 10}`,
+        note: "Estimated from serial/date. Verify warranty separately with a real lookup."
+      }
+    : {
+        note: "Unknown. Verify warranty separately with a real lookup."
+      };
+  const extractedFields = {
+    brand,
+    modelNumber,
+    serialNumber,
+    unitType,
+    buildDateEstimate: build.label,
+    refrigerantType: refrigeration.refrigerantType || "",
+    factoryCharge: refrigeration.factoryCharge || "",
+    voltage: electrical.voltage || "",
+    mca: electrical.mca || "",
+    mocp: electrical.mocp || ""
+  };
+  const confidenceSignals = Object.entries(extractedFields)
+    .filter(([, value]) => Boolean(value))
+    .map(([field]) => `Extracted ${field}`);
+  const confidence = Math.max(0.1, Math.min(0.95, confidenceSignals.length / 10));
 
   return {
     brand: brand || "",
@@ -251,10 +277,29 @@ function parseEquipmentIdentity(rawText) {
     unitType: unitType || "",
     type: unitType || "",
     capacity: "Unknown",
-    estimatedAge: "Unknown",
+    buildDateEstimate: build.label || "",
+    buildYearEstimate: build.year ? String(build.year) : "",
+    estimatedAge: build.ageLabel || "Unknown",
+    refrigeration,
+    electrical,
+    warrantyEstimate,
     confidence,
-    rawOcrText: text
+    rawOcrText: text,
+    ocrDebug: {
+      rawText: text,
+      normalizedText: normalized,
+      extractedFields,
+      confidenceSignals
+    }
   };
+}
+
+function normalizeOcrText(text) {
+  return text
+    .replace(/\r/g, "\n")
+    .replace(/[|]/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .trim();
 }
 
 function extractBrand(text) {
@@ -298,6 +343,144 @@ function extractLabeledValue(lines, labels) {
   return "";
 }
 
+function extractRefrigeration(text) {
+  return {
+    refrigerantType: extractRefrigerantType(text),
+    factoryCharge: extractFieldNearLabels(text, [
+      "factory charge",
+      "charge",
+      "factory charged",
+      "refrigerant charge"
+    ]),
+    additionalChargeNote: extractSentenceWith(text, ["additional charge", "add charge", "per ft"]),
+    meteringNote: extractSentenceWith(text, ["txv", "piston", "orifice", "metering"]),
+    targetSubcooling: extractFieldNearLabels(text, [
+      "target subcooling",
+      "subcooling",
+      "subcool"
+    ])
+  };
+}
+
+function extractElectrical(text) {
+  return {
+    voltage: extractVoltage(text),
+    phase: extractPhase(text),
+    mca: extractFieldNearLabels(text, ["mca", "minimum circuit ampacity"]),
+    mocp: extractFieldNearLabels(text, [
+      "mocp",
+      "max fuse",
+      "max breaker",
+      "maximum fuse",
+      "max overcurrent"
+    ]),
+    compressorRla: extractFieldNearLabels(text, ["compressor rla", "comp rla", "rla"]),
+    compressorLra: extractFieldNearLabels(text, ["compressor lra", "comp lra", "lra"]),
+    fanMotorFla: extractFieldNearLabels(text, ["fan fla", "fan motor fla", "motor fla", "fla"]),
+    fanMotorHp: extractFieldNearLabels(text, ["fan hp", "fan motor hp", "hp"]),
+    blowerMotorType: extractSentenceWith(text, ["ecm", "psc", "variable speed", "x13"])
+  };
+}
+
+function extractRefrigerantType(text) {
+  const match = text.match(/\bR[\s-]?(22|410A|454B|32|407C|134A)\b/i);
+  return match ? `R-${match[1].toUpperCase()}` : "";
+}
+
+function extractVoltage(text) {
+  const match = text.match(/\b(115|120|208|230|240|277|460|575)\s*(?:\/\s*(230|240|460))?\s*V(?:AC)?\b/i);
+  return match ? cleanEquipmentToken(match[0].toUpperCase()) : "";
+}
+
+function extractPhase(text) {
+  const match = text.match(/\b(1|3)\s*(?:PH|PHASE)\b/i);
+  return match ? `${match[1]} phase` : "";
+}
+
+function extractFieldNearLabels(text, labels) {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+
+  for (const line of lines) {
+    for (const label of labels) {
+      const pattern = new RegExp(`\\b${escapeRegex(label)}\\b\\s*(?:#|:|-)?\\s*([A-Z0-9][A-Z0-9 ._\\-/]+)`, "i");
+      const match = line.match(pattern);
+
+      if (match?.[1]) {
+        return cleanFieldValue(match[1]);
+      }
+    }
+  }
+
+  return "";
+}
+
+function extractSentenceWith(text, keywords) {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const line = lines.find((candidate) =>
+    keywords.some((keyword) => candidate.toLowerCase().includes(keyword))
+  );
+
+  return line ? cleanFieldValue(line) : "";
+}
+
+function estimateBuildDate(serialNumber, text) {
+  const explicitYear = extractExplicitYear(text);
+
+  if (explicitYear) {
+    return buildDateResult(explicitYear, "Estimated from visible manufacture/date field");
+  }
+
+  const serialYear = inferYearFromSerial(serialNumber);
+
+  if (serialYear) {
+    return buildDateResult(serialYear, "Estimated from serial/date - verify warranty separately");
+  }
+
+  return {
+    year: undefined,
+    label: "",
+    ageLabel: "Unknown"
+  };
+}
+
+function extractExplicitYear(text) {
+  const match = text.match(/\b(?:mfg|manufactured|date|mfd)\b[^0-9]*(20[0-2][0-9]|19[8-9][0-9])\b/i);
+  return match ? Number(match[1]) : undefined;
+}
+
+function inferYearFromSerial(serialNumber) {
+  if (!serialNumber) {
+    return undefined;
+  }
+
+  const yearCandidates = serialNumber.match(/(20[0-2][0-9]|19[8-9][0-9])/g);
+
+  if (yearCandidates?.[0]) {
+    return Number(yearCandidates[0]);
+  }
+
+  const twoDigitPrefix = serialNumber.match(/^(\d{2})/);
+
+  if (twoDigitPrefix) {
+    const value = Number(twoDigitPrefix[1]);
+    const year = value <= 35 ? 2000 + value : 1900 + value;
+    return year >= 1980 && year <= new Date().getFullYear() ? year : undefined;
+  }
+
+  return undefined;
+}
+
+function buildDateResult(year, note) {
+  const currentYear = new Date().getFullYear();
+  const age = Math.max(0, currentYear - year);
+
+  return {
+    year,
+    label: `${year} (${note})`,
+    ageLabel: `${age} years estimated`
+  };
+}
+
 function extractUnitType(text) {
   const lowerText = text.toLowerCase();
 
@@ -330,6 +513,14 @@ function extractUnitType(text) {
 
 function cleanEquipmentToken(value) {
   return value.replace(/^[#:\-\s]+/, "").replace(/[,\s;]+$/, "").trim();
+}
+
+function cleanFieldValue(value) {
+  return value
+    .replace(/^[#:\-\s]+/, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/[,\s;]+$/, "")
+    .trim();
 }
 
 function escapeRegex(value) {

@@ -22,6 +22,37 @@ export interface OcrExtractTextResponse {
     type: string;
     capacity: string;
     estimatedAge: string;
+    buildDateEstimate?: string;
+    buildYearEstimate?: string;
+    refrigeration?: {
+      refrigerantType?: string;
+      factoryCharge?: string;
+      additionalChargeNote?: string;
+      meteringNote?: string;
+      targetSubcooling?: string;
+    };
+    electrical?: {
+      voltage?: string;
+      phase?: string;
+      mca?: string;
+      mocp?: string;
+      compressorRla?: string;
+      compressorLra?: string;
+      fanMotorFla?: string;
+      fanMotorHp?: string;
+      blowerMotorType?: string;
+    };
+    warrantyEstimate?: {
+      fiveYearDate?: string;
+      tenYearDate?: string;
+      note?: string;
+    };
+    ocrDebug?: {
+      rawText?: string;
+      normalizedText?: string;
+      extractedFields?: Record<string, string>;
+      confidenceSignals?: string[];
+    };
     confidence: number;
     rawOcrText: string;
   };
