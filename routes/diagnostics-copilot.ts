@@ -43,6 +43,11 @@ function buildContextBlock(context: DiagnosticsCopilotRequest['context']) {
   const knownFacts = 'knownFacts' in context ? context.knownFacts : [];
   const unknowns = 'unknowns' in context ? context.unknowns : [];
   const currentStage = context?.currentStage ?? context?.stage ?? 'unknown';
+  const previousQuestionsAsked =
+    'previousQuestionsAsked' in context ? context.previousQuestionsAsked : [];
+  const currentConfidence =
+    'currentConfidence' in context ? context.currentConfidence : null;
+  const likelyPath = 'likelyPath' in context ? context.likelyPath : 'unknown';
   const latestMessage = 'latestTechnicianMessage' in context ? context.latestTechnicianMessage : 'none';
 
   return [
@@ -52,8 +57,11 @@ function buildContextBlock(context: DiagnosticsCopilotRequest['context']) {
     `Equipment: ${JSON.stringify(equipment)}`,
     `Follow-up answers: ${JSON.stringify(followUpAnswers)}`,
     `Tech notes: ${JSON.stringify(techNotes)}`,
+    `Current confidence: ${JSON.stringify(currentConfidence)}`,
+    `Current likely path: ${JSON.stringify(likelyPath)}`,
     `Known facts: ${JSON.stringify(knownFacts)}`,
     `Unknowns: ${JSON.stringify(unknowns)}`,
+    `Previous questions asked: ${JSON.stringify(previousQuestionsAsked)}`,
     `Latest technician message: ${latestMessage}`,
   ].join('\n');
 }
@@ -73,6 +81,8 @@ function buildDiagnosticRules() {
     '- For Not Cooling with unknown outdoor operation, first ask whether the outdoor unit, compressor, or condenser fan is running.',
     '- For Not Cooling with suspected refrigeration behavior, ask for one pressure/temperature reading: suction pressure, liquid/head pressure, outdoor ambient, return/supply temp, suction line temp, or liquid line temp.',
     '- For airflow-related issues, ask blower running, filter restriction, or whether weak airflow is at all vents or one area.',
+    '- Do not ask questions already listed in Previous questions asked.',
+    '- If answerType is groupedMeasurementSet, it may request a small set of related measurements; otherwise ask one question only.',
   ].join('\n');
 }
 
@@ -80,6 +90,7 @@ function buildTaskInstruction() {
   return [
     'TASK INSTRUCTION',
     'Based on this information:',
+    '- choose the single most useful next diagnostic question from the actual context',
     '- decide whether there is enough confirmed evidence to name a likely cause',
     '- if evidence is insufficient, say so and ask the single next best diagnostic question',
     '- if evidence is medium confidence, describe the likely path and ask one confirming question',
@@ -98,14 +109,16 @@ function buildOutputFormat() {
     '{',
     '  "messageText": string,',
     '  "confidence": number,',
-    '  "nextStep": string,',
+    '  "likelyPath": string,',
     '  "nextBestQuestion": string | null,',
+    '  "answerType": "singleChoice" | "yesNo" | "numeric" | "freeText" | "groupedMeasurementSet",',
+    '  "answerOptions": string[],',
     '  "missingInfo": string[],',
-    '  "quickPrompts": string[]',
+    '  "stopAndDiagnose": boolean',
     '}',
     'confidence must be 0-100 based only on confirmed evidence.',
     "If confidence is below 45, messageText must not name a likely failed part. It should say: Not enough confirmed data yet. Based on what we know, I'd check ___ next.",
-    'quickPrompts must directly answer or capture nextBestQuestion, not generic chat suggestions.',
+    'answerOptions must directly answer nextBestQuestion. Use [] for freeText or numeric unless short choices are useful.',
   ].join('\n');
 }
 
@@ -216,7 +229,9 @@ function normalizeCopilotResponse(parsed: Partial<DiagnosticsCopilotResponse>) {
       ? parsed.nextStep
       : typeof parsed.nextBestCheck === 'string'
         ? parsed.nextBestCheck
-        : 'Confirm the next live field measurement before ranking causes.';
+        : typeof parsed.nextBestQuestion === 'string'
+          ? parsed.nextBestQuestion
+          : 'Confirm the next live field measurement before ranking causes.';
   const followUpQuestion =
     typeof parsed.nextBestQuestion === 'string'
       ? parsed.nextBestQuestion
@@ -234,21 +249,27 @@ function normalizeCopilotResponse(parsed: Partial<DiagnosticsCopilotResponse>) {
     : followUpQuestion
       ? [followUpQuestion]
       : [];
-  const quickPrompts = normalizeQuickPrompts(parsed.quickPrompts, nextBestCheck, followUpQuestion);
+  const answerOptions = Array.isArray(parsed.answerOptions)
+    ? parsed.answerOptions.slice(0, 6).map(String)
+    : [];
 
   return {
     provider: 'openai',
     insight: typeof parsed.insight === 'string' ? parsed.insight : messageText,
-    quickPrompts,
+    quickPrompts: answerOptions,
     messageText,
     reasoningSummary: messageText,
     nextBestQuestion: followUpQuestion || '',
     followUpQuestion,
+    likelyPath: typeof parsed.likelyPath === 'string' ? parsed.likelyPath : '',
+    answerType: normalizeAnswerType(parsed.answerType),
+    answerOptions,
     missingInfo,
     nextBestCheck,
     nextStep: nextBestCheck,
     confidence,
     cautions: [],
+    stopAndDiagnose: parsed.stopAndDiagnose === true,
     diagnosisResult: buildDiagnosisAdapter(
       parsed,
       messageText,
@@ -259,60 +280,18 @@ function normalizeCopilotResponse(parsed: Partial<DiagnosticsCopilotResponse>) {
   };
 }
 
-function normalizeQuickPrompts(
-  prompts: unknown,
-  nextStep: string,
-  followUpQuestion: string | null
-) {
-  if (Array.isArray(prompts) && prompts.length > 0) {
-    return prompts.slice(0, 4).map(String);
+function normalizeAnswerType(value: unknown) {
+  if (
+    value === 'singleChoice' ||
+    value === 'yesNo' ||
+    value === 'numeric' ||
+    value === 'freeText' ||
+    value === 'groupedMeasurementSet'
+  ) {
+    return value;
   }
 
-  return buildQuestionChips(followUpQuestion, nextStep);
-}
-
-function buildQuestionChips(question: string | null, nextStep: string) {
-  const text = `${question || ''} ${nextStep || ''}`.toLowerCase();
-
-  if (/\b(condenser fan|fan running|fan)\b/.test(text)) {
-    return ['Yes', 'No', 'Fan only', 'Not sure'];
-  }
-
-  if (/\b(outdoor unit|outdoor section)\b/.test(text)) {
-    return ['Yes', 'No', 'Fan only', 'Not sure'];
-  }
-
-  if (/\bcompressor\b/.test(text)) {
-    return ['Running', 'Humming', 'Off', 'Not sure'];
-  }
-
-  if (/\b(suction pressure|pressure)\b/.test(text)) {
-    return ['Add suction pressure'];
-  }
-
-  if (/\b(liquid|head pressure)\b/.test(text)) {
-    return ['Add liquid pressure'];
-  }
-
-  if (/\bambient|outdoor temp\b/.test(text)) {
-    return ['Add outdoor ambient'];
-  }
-
-  if (/\breturn|supply\b/.test(text)) {
-    return ['Add return/supply temp'];
-  }
-
-  if (/\bfilter\b/.test(text)) {
-    return ['Clean', 'Dirty', 'Restrictive', 'Not sure'];
-  }
-
-  if (/\bblower\b/.test(text)) {
-    return ['Blower running', 'Blower off', 'Weak', 'Not sure'];
-  }
-
-  return [nextStep].filter(
-    (value): value is string => typeof value === 'string' && value.trim().length > 0
-  );
+  return 'freeText';
 }
 
 function buildDiagnosisAdapter(
@@ -360,9 +339,11 @@ function logMissingFields(response: Partial<DiagnosticsCopilotResponse>) {
   const missing = [
     'messageText',
     'confidence',
-    'nextStep',
     'nextBestQuestion',
+    'answerType',
+    'answerOptions',
     'missingInfo',
+    'stopAndDiagnose',
   ].filter((field) => response[field as keyof DiagnosticsCopilotResponse] === undefined);
 
   if (missing.length > 0) {

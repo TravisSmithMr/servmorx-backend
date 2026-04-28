@@ -18,6 +18,11 @@ export interface DiagnosticsContextPayload {
   stage?: string | null;
   currentStage?: string | null;
   latestTechnicianMessage?: string | null;
+  currentConfidence?: number | null;
+  likelyPath?: string | null;
+  answerType?: string | null;
+  answerOptions?: string[];
+  previousQuestionsAsked?: string[];
   route: string | null;
   equipment: DiagnosticsEquipmentContext;
   followUpAnswers?: Record<string, unknown>;
@@ -50,9 +55,13 @@ export interface DiagnosticsCopilotResponse {
   nextBestCheck?: string;
   nextStep?: string;
   followUpQuestion?: string | null;
+  likelyPath?: string;
+  answerType?: 'singleChoice' | 'yesNo' | 'numeric' | 'freeText' | 'groupedMeasurementSet';
+  answerOptions?: string[];
   missingInfo?: string[];
   confidence?: number;
   cautions?: string[];
+  stopAndDiagnose?: boolean;
   diagnosisResult?: {
     mostLikely: {
       label: string;
