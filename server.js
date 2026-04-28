@@ -66,9 +66,12 @@ app.listen(PORT, "0.0.0.0", () => {
 });
 
 async function createCopilotAiResponse(payload) {
-  const context = payload.context || {};
+  const context = {
+    ...(payload.context || {}),
+    latestTechnicianMessage: payload.message || null
+  };
   console.log("[diagnostics/copilot] AI context:", JSON.stringify(context));
-  const rawJson = await createServerJsonResponse(buildCopilotPrompt(context, payload.message));
+  const rawJson = await createServerJsonResponse(buildCopilotPrompt(context));
   console.log("[diagnostics/copilot] AI response JSON:", JSON.stringify(rawJson));
   logMissingFields(rawJson);
   return normalizeCopilotResponse(rawJson);
@@ -97,7 +100,8 @@ async function createServerJsonResponse(prompt) {
       messages: [
         {
           role: "system",
-          content: buildSystemPrompt()
+          content:
+            "You are a senior HVAC service technician. You diagnose systems based on real field observations. You do not guess without evidence. You prioritize confirming tests before conclusions. Return valid JSON only."
         },
         {
           role: "user",
@@ -121,32 +125,38 @@ async function createServerJsonResponse(prompt) {
   return JSON.parse(content);
 }
 
-function buildCopilotPrompt(context, message) {
+function buildCopilotPrompt(context) {
+  return [
+    buildSystemRole(),
+    buildContextBlock(context),
+    buildDiagnosticRules(),
+    buildTaskInstruction(),
+    buildOutputFormat()
+  ].join("\n\n");
+}
+
+function buildSystemRole() {
+  return [
+    "SYSTEM ROLE",
+    "You are a senior HVAC service technician.",
+    "You diagnose systems based on real field observations.",
+    "You do not guess without evidence.",
+    "You prioritize confirming tests before conclusions."
+  ].join("\n");
+}
+
+function buildContextBlock(context) {
   const issue = context?.selectedIssue || context?.issue || "unknown";
   const equipment = context?.equipment || null;
   const followUpAnswers = context?.followUpAnswers || {};
   const techNotes = Array.isArray(context?.techNotes) ? context.techNotes : [];
   const knownFacts = Array.isArray(context?.knownFacts) ? context.knownFacts : [];
   const unknowns = Array.isArray(context?.unknowns) ? context.unknowns : [];
-  const contradictions = Array.isArray(context?.contradictions) ? context.contradictions : [];
   const currentStage = context?.currentStage || context?.stage || "unknown";
+  const latestMessage = context?.latestTechnicianMessage || "none";
 
   return [
-    "Build the next SERVMORX TECH diagnostic response from this context.",
-    "Reason from knownFacts first. Treat unknowns as missing data, not evidence.",
-    "If there is not enough confirmed data, use this wording in messageText: Not enough confirmed data yet. Based on what we know, I'd check ___ next.",
-    "Return strict JSON only. No markdown. No prose outside JSON.",
-    "Required top-level shape:",
-    "{ provider, insight, messageText, reasoningSummary, nextBestQuestion, nextBestCheck, confidence, cautions, quickPrompts, diagnosisResult }",
-    'provider must be exactly "openai".',
-    "confidence must be Low, Medium, or High.",
-    "messageText must be 2-4 short sentences.",
-    "quickPrompts must be 0-3 short field checks.",
-    "cautions must list unsupported claims or safety cautions, if any.",
-    "For Diagnosis or Result, include diagnosisResult. If evidence is weak, keep confidence low and missingInfo populated.",
-    "diagnosisResult shape: { mostLikely: { label, confidence }, confidence, secondary: [{ label, confidence }], reasoning, nextSteps, whatWouldConfirm, whatWouldRuleOut, missingInfo, confidenceLabel, recommendedActions, estimatedRange }.",
-    "recommendedActions should mirror the practical nextSteps so the existing app repair screen can display them.",
-    "",
+    "CONTEXT",
     `Current stage: ${currentStage}`,
     `Issue: ${issue}`,
     `Equipment: ${JSON.stringify(equipment)}`,
@@ -154,35 +164,45 @@ function buildCopilotPrompt(context, message) {
     `Tech notes: ${JSON.stringify(techNotes)}`,
     `Known facts: ${JSON.stringify(knownFacts)}`,
     `Unknowns: ${JSON.stringify(unknowns)}`,
-    `Contradictions: ${JSON.stringify(contradictions)}`,
-    "",
-    "Diagnostic context JSON:",
-    JSON.stringify(context || {}, null, 2),
-    "",
-    `Latest technician message: ${message || "none"}`
+    `Latest technician message: ${latestMessage}`
   ].join("\n");
 }
 
-function buildSystemPrompt() {
+function buildDiagnosticRules() {
   return [
-    "You are SERVMORX TECH, a senior HVAC service technician assisting another tech in the field.",
-    "Do not act like customer support. Do not over-explain basic HVAC concepts.",
-    "Do not guess from one symptom. Separate confirmed facts from assumptions.",
-    "Prioritize live field observations, measurements, and technician notes over common failures.",
-    "Never say a part is bad without naming the confirming check.",
-    "When confidence is low, ask one sharp next question and give one next best field check.",
-    "Every response must include nextBestCheck.",
-    "Use likely path language, not absolute diagnosis language.",
-    "HVAC reasoning rules:",
-    "- No cooling plus fan only does not automatically mean bad compressor.",
-    "- Fan running with compressor off should first separate capacitor, compressor overload, contactor/output, and safety/control path.",
-    "- Low charge should not be suggested strongly without pressure/temp evidence or icing behavior.",
-    "- Airflow issues should be considered before charge when airflow symptoms exist.",
-    "- Electrical/control issues should be checked before condemning major components.",
-    "- Check capacitor MFD before condemning compressor when start/run behavior points electrical.",
-    "- Verify 24V at the contactor coil before assuming an outdoor unit component has failed.",
-    "- Confirm compressor amp draw before leaning into compressor mechanical failure.",
-    "Return valid JSON only."
+    "DIAGNOSTIC RULES",
+    "- Do not assume refrigerant issues without pressure/temperature evidence.",
+    "- Separate airflow vs electrical vs refrigeration first.",
+    "- No cooling + fan only does not automatically mean bad compressor.",
+    "- Always suggest the next best test.",
+    "- Never condemn major components without confirmation."
+  ].join("\n");
+}
+
+function buildTaskInstruction() {
+  return [
+    "TASK INSTRUCTION",
+    "Based on this information:",
+    "- explain what is most likely happening",
+    "- explain why",
+    "- suggest the next best diagnostic step",
+    "- ask ONE follow-up question if needed",
+    "",
+    "Keep responses short: 2-4 sentences, no filler, no generic chatbot language, and sound like a field technician."
+  ].join("\n");
+}
+
+function buildOutputFormat() {
+  return [
+    "OUTPUT FORMAT",
+    "Return structured JSON only:",
+    "{",
+    '  "messageText": string,',
+    '  "confidence": number,',
+    '  "nextStep": string,',
+    '  "followUpQuestion": string | null',
+    "}",
+    "confidence must be 0-100 based only on confirmed evidence."
   ].join("\n");
 }
 
@@ -192,23 +212,63 @@ function normalizeCopilotResponse(parsed) {
       ? parsed.messageText
       : "Not enough confirmed data yet. Based on what we know, I'd check the next field measurement.";
   const nextBestCheck =
-    typeof parsed.nextBestCheck === "string"
-      ? parsed.nextBestCheck
+    typeof parsed.nextStep === "string"
+      ? parsed.nextStep
+      : typeof parsed.nextBestCheck === "string"
+        ? parsed.nextBestCheck
       : "Confirm the next live field measurement before ranking causes.";
+  const followUpQuestion =
+    typeof parsed.followUpQuestion === "string"
+      ? parsed.followUpQuestion
+      : typeof parsed.nextBestQuestion === "string"
+        ? parsed.nextBestQuestion
+        : null;
+  const confidence = clampConfidence(parsed.confidence);
 
   return {
     provider: "openai",
-    insight: typeof parsed.insight === "string" ? parsed.insight : "",
-    quickPrompts: Array.isArray(parsed.quickPrompts) ? parsed.quickPrompts : [],
+    insight: typeof parsed.insight === "string" ? parsed.insight : messageText,
+    quickPrompts: buildQuickPrompts(nextBestCheck, followUpQuestion),
     messageText,
-    reasoningSummary:
-      typeof parsed.reasoningSummary === "string" ? parsed.reasoningSummary : "",
-    nextBestQuestion:
-      typeof parsed.nextBestQuestion === "string" ? parsed.nextBestQuestion : "",
+    reasoningSummary: messageText,
+    nextBestQuestion: followUpQuestion || "",
+    followUpQuestion,
     nextBestCheck,
-    confidence: normalizeConfidenceLabel(parsed.confidence),
-    cautions: Array.isArray(parsed.cautions) ? parsed.cautions.map(String).slice(0, 3) : [],
-    diagnosisResult: normalizeDiagnosisResult(parsed.diagnosisResult)
+    nextStep: nextBestCheck,
+    confidence,
+    cautions: [],
+    diagnosisResult: buildDiagnosisAdapter(parsed, messageText, nextBestCheck, followUpQuestion)
+  };
+}
+
+function buildQuickPrompts(nextStep, followUpQuestion) {
+  return [nextStep, followUpQuestion].filter(
+    (value) => typeof value === "string" && value.trim().length > 0
+  );
+}
+
+function buildDiagnosisAdapter(parsed, messageText, nextStep, followUpQuestion) {
+  if (parsed.diagnosisResult) {
+    return normalizeDiagnosisResult(parsed.diagnosisResult);
+  }
+
+  const confidence = clampConfidence(parsed.confidence);
+
+  return {
+    mostLikely: {
+      label: "Diagnostic path needs confirmation",
+      confidence
+    },
+    confidence,
+    secondary: [],
+    confidenceLabel: confidence >= 75 ? "High" : confidence >= 45 ? "Medium" : "Low",
+    reasoning: messageText,
+    nextSteps: [nextStep],
+    whatWouldConfirm: [nextStep],
+    whatWouldRuleOut: followUpQuestion ? [followUpQuestion] : [],
+    missingInfo: followUpQuestion ? [followUpQuestion] : [],
+    recommendedActions: [nextStep],
+    estimatedRange: "Estimate unavailable"
   };
 }
 
@@ -256,10 +316,6 @@ function normalizeDiagnosisResult(value) {
   };
 }
 
-function normalizeConfidenceLabel(value) {
-  return value === "High" || value === "Medium" || value === "Low" ? value : "Low";
-}
-
 function clampConfidence(value) {
   const numeric = Number(value);
 
@@ -273,12 +329,9 @@ function clampConfidence(value) {
 function logMissingFields(response) {
   const missing = [
     "messageText",
-    "reasoningSummary",
-    "nextBestQuestion",
-    "nextBestCheck",
     "confidence",
-    "cautions",
-    "quickPrompts"
+    "nextStep",
+    "followUpQuestion"
   ].filter((field) => response[field] === undefined);
 
   if (missing.length > 0) {

@@ -17,6 +17,7 @@ export interface DiagnosticsContextPayload {
   selectedIssue?: string | null;
   stage?: string | null;
   currentStage?: string | null;
+  latestTechnicianMessage?: string | null;
   route: string | null;
   equipment: DiagnosticsEquipmentContext;
   followUpAnswers?: Record<string, unknown>;
@@ -47,7 +48,9 @@ export interface DiagnosticsCopilotResponse {
   reasoningSummary?: string;
   nextBestQuestion?: string;
   nextBestCheck?: string;
-  confidence?: 'High' | 'Medium' | 'Low';
+  nextStep?: string;
+  followUpQuestion?: string | null;
+  confidence?: number;
   cautions?: string[];
   diagnosisResult?: {
     mostLikely: {
