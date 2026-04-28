@@ -45,6 +45,10 @@ function buildContextBlock(context: DiagnosticsCopilotRequest['context']) {
   const currentStage = context?.currentStage ?? context?.stage ?? 'unknown';
   const previousQuestionsAsked =
     'previousQuestionsAsked' in context ? context.previousQuestionsAsked : [];
+  const askedQuestions = 'askedQuestions' in context ? context.askedQuestions : [];
+  const answeredQuestions = 'answeredQuestions' in context ? context.answeredQuestions : {};
+  const currentQuestionId = 'currentQuestionId' in context ? context.currentQuestionId : null;
+  const measurementValues = 'measurementValues' in context ? context.measurementValues : {};
   const currentConfidence =
     'currentConfidence' in context ? context.currentConfidence : null;
   const likelyPath = 'likelyPath' in context ? context.likelyPath : 'unknown';
@@ -62,6 +66,10 @@ function buildContextBlock(context: DiagnosticsCopilotRequest['context']) {
     `Known facts: ${JSON.stringify(knownFacts)}`,
     `Unknowns: ${JSON.stringify(unknowns)}`,
     `Previous questions asked: ${JSON.stringify(previousQuestionsAsked)}`,
+    `Asked question ids: ${JSON.stringify(askedQuestions)}`,
+    `Answered questions: ${JSON.stringify(answeredQuestions)}`,
+    `Current question id: ${JSON.stringify(currentQuestionId)}`,
+    `Measurement values: ${JSON.stringify(measurementValues)}`,
     `Latest technician message: ${latestMessage}`,
   ].join('\n');
 }
@@ -79,9 +87,14 @@ function buildDiagnosticRules() {
     '- High confidence means give the likely cause and the next confirming check.',
     '- Ask only ONE question at a time.',
     '- For Not Cooling with unknown outdoor operation, first ask whether the outdoor unit, compressor, or condenser fan is running.',
-    '- For Not Cooling with suspected refrigeration behavior, ask for one pressure/temperature reading: suction pressure, liquid/head pressure, outdoor ambient, return/supply temp, suction line temp, or liquid line temp.',
+    '- Not Cooling sequence: first separate indoor blower, outdoor unit, compressor, and condenser fan operation.',
+    '- If refrigeration path is plausible, ask for suction pressure, then head/liquid pressure, then outdoor ambient, then superheat or subcooling if available, then coil frozen/airflow condition.',
+    '- Prefer superheat and subcooling over raw suction/liquid line temperature unless the app is calculating SH/SC.',
+    '- If suction_pressure is already answered, acknowledge it and move to head_pressure or outdoor_ambient. Do not ask suction_pressure again.',
+    '- If only one pressure value is known, do not diagnose low refrigerant confidently.',
     '- For airflow-related issues, ask blower running, filter restriction, or whether weak airflow is at all vents or one area.',
     '- Do not ask questions already listed in Previous questions asked.',
+    '- Do not ask question ids already present in Answered questions or Asked question ids unless the user says the value changed.',
     '- If answerType is groupedMeasurementSet, it may request a small set of related measurements; otherwise ask one question only.',
   ].join('\n');
 }
@@ -111,6 +124,7 @@ function buildOutputFormat() {
     '  "confidence": number,',
     '  "likelyPath": string,',
     '  "nextBestQuestion": string | null,',
+    '  "nextQuestionId": "indoor_blower_status" | "outdoor_unit_status" | "compressor_status" | "condenser_fan_status" | "suction_pressure" | "head_pressure" | "outdoor_ambient" | "superheat" | "subcooling" | "coil_frozen" | "airflow_status" | "filter_status" | "vent_distribution" | "freeze_location" | "run_time" | "other_detail" | null,',
     '  "answerType": "singleChoice" | "yesNo" | "numeric" | "freeText" | "groupedMeasurementSet",',
     '  "answerOptions": string[],',
     '  "missingInfo": string[],',
@@ -260,6 +274,7 @@ function normalizeCopilotResponse(parsed: Partial<DiagnosticsCopilotResponse>) {
     messageText,
     reasoningSummary: messageText,
     nextBestQuestion: followUpQuestion || '',
+    nextQuestionId: normalizeQuestionId(parsed.nextQuestionId),
     followUpQuestion,
     likelyPath: typeof parsed.likelyPath === 'string' ? parsed.likelyPath : '',
     answerType: normalizeAnswerType(parsed.answerType),
@@ -278,6 +293,29 @@ function normalizeCopilotResponse(parsed: Partial<DiagnosticsCopilotResponse>) {
       missingInfo
     ),
   };
+}
+
+function normalizeQuestionId(value: unknown) {
+  const knownIds = [
+    'indoor_blower_status',
+    'outdoor_unit_status',
+    'compressor_status',
+    'condenser_fan_status',
+    'suction_pressure',
+    'head_pressure',
+    'outdoor_ambient',
+    'superheat',
+    'subcooling',
+    'coil_frozen',
+    'airflow_status',
+    'filter_status',
+    'vent_distribution',
+    'freeze_location',
+    'run_time',
+    'other_detail',
+  ];
+
+  return knownIds.includes(value as string) ? (value as string) : undefined;
 }
 
 function normalizeAnswerType(value: unknown) {
@@ -340,6 +378,7 @@ function logMissingFields(response: Partial<DiagnosticsCopilotResponse>) {
     'messageText',
     'confidence',
     'nextBestQuestion',
+    'nextQuestionId',
     'answerType',
     'answerOptions',
     'missingInfo',

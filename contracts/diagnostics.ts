@@ -23,6 +23,10 @@ export interface DiagnosticsContextPayload {
   answerType?: string | null;
   answerOptions?: string[];
   previousQuestionsAsked?: string[];
+  askedQuestions?: string[];
+  answeredQuestions?: Record<string, unknown>;
+  currentQuestionId?: string | null;
+  measurementValues?: Record<string, number>;
   route: string | null;
   equipment: DiagnosticsEquipmentContext;
   followUpAnswers?: Record<string, unknown>;
@@ -52,6 +56,7 @@ export interface DiagnosticsCopilotResponse {
   messageText: string;
   reasoningSummary?: string;
   nextBestQuestion?: string;
+  nextQuestionId?: string;
   nextBestCheck?: string;
   nextStep?: string;
   followUpQuestion?: string | null;
