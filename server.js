@@ -175,7 +175,14 @@ function buildDiagnosticRules() {
     "- Separate airflow vs electrical vs refrigeration first.",
     "- No cooling + fan only does not automatically mean bad compressor.",
     "- Always suggest the next best test.",
-    "- Never condemn major components without confirmation."
+    "- Never condemn major components without confirmation.",
+    "- Low confidence means ask the next best question instead of ranking a cause.",
+    "- Medium confidence means give the likely path and ask a confirming question.",
+    "- High confidence means give the likely cause and the next confirming check.",
+    "- Ask only ONE question at a time.",
+    "- For Not Cooling with unknown outdoor operation, first ask whether the outdoor unit, compressor, or condenser fan is running.",
+    "- For Not Cooling with suspected refrigeration behavior, ask for one pressure/temperature reading: suction pressure, liquid/head pressure, outdoor ambient, return/supply temp, suction line temp, or liquid line temp.",
+    "- For airflow-related issues, ask blower running, filter restriction, or whether weak airflow is at all vents or one area."
   ].join("\n");
 }
 
@@ -183,11 +190,13 @@ function buildTaskInstruction() {
   return [
     "TASK INSTRUCTION",
     "Based on this information:",
-    "- explain what is most likely happening",
-    "- explain why",
+    "- decide whether there is enough confirmed evidence to name a likely cause",
+    "- if evidence is insufficient, say so and ask the single next best diagnostic question",
+    "- if evidence is medium confidence, describe the likely path and ask one confirming question",
+    "- if evidence is high confidence, give the likely cause and the next confirming check",
     "- suggest the next best diagnostic step",
-    "- ask ONE follow-up question if needed",
     "",
+    "Do not confidently rank causes when required data is missing.",
     "Keep responses short: 2-4 sentences, no filler, no generic chatbot language, and sound like a field technician."
   ].join("\n");
 }
@@ -200,17 +209,19 @@ function buildOutputFormat() {
     '  "messageText": string,',
     '  "confidence": number,',
     '  "nextStep": string,',
-    '  "followUpQuestion": string | null',
+    '  "nextBestQuestion": string | null,',
+    '  "missingInfo": string[],',
+    '  "quickPrompts": string[]',
     "}",
-    "confidence must be 0-100 based only on confirmed evidence."
+    "confidence must be 0-100 based only on confirmed evidence.",
+    "If confidence is below 45, messageText must not name a likely failed part. It should say: Not enough confirmed data yet. Based on what we know, I'd check ___ next.",
+    "quickPrompts must directly answer or capture nextBestQuestion, not generic chat suggestions."
   ].join("\n");
 }
 
 function normalizeCopilotResponse(parsed) {
-  const messageText =
-    typeof parsed.messageText === "string"
-      ? parsed.messageText
-      : "Not enough confirmed data yet. Based on what we know, I'd check the next field measurement.";
+  const rawMessageText =
+    typeof parsed.messageText === "string" ? parsed.messageText : "";
   const nextBestCheck =
     typeof parsed.nextStep === "string"
       ? parsed.nextStep
@@ -218,36 +229,98 @@ function normalizeCopilotResponse(parsed) {
         ? parsed.nextBestCheck
       : "Confirm the next live field measurement before ranking causes.";
   const followUpQuestion =
-    typeof parsed.followUpQuestion === "string"
-      ? parsed.followUpQuestion
-      : typeof parsed.nextBestQuestion === "string"
-        ? parsed.nextBestQuestion
+    typeof parsed.nextBestQuestion === "string"
+      ? parsed.nextBestQuestion
+      : typeof parsed.followUpQuestion === "string"
+        ? parsed.followUpQuestion
         : null;
   const confidence = clampConfidence(parsed.confidence);
+  const messageText =
+    confidence < 45
+      ? `Not enough confirmed data yet. Based on what we know, I'd check ${nextBestCheck} next.`
+      : rawMessageText ||
+        "Not enough confirmed data yet. Based on what we know, I'd check the next field measurement.";
+  const missingInfo = Array.isArray(parsed.missingInfo)
+    ? parsed.missingInfo.slice(0, 5).map(String)
+    : followUpQuestion
+      ? [followUpQuestion]
+      : [];
+  const quickPrompts = normalizeQuickPrompts(parsed.quickPrompts, nextBestCheck, followUpQuestion);
 
   return {
     provider: "openai",
     insight: typeof parsed.insight === "string" ? parsed.insight : messageText,
-    quickPrompts: buildQuickPrompts(nextBestCheck, followUpQuestion),
+    quickPrompts,
     messageText,
     reasoningSummary: messageText,
     nextBestQuestion: followUpQuestion || "",
     followUpQuestion,
+    missingInfo,
     nextBestCheck,
     nextStep: nextBestCheck,
     confidence,
     cautions: [],
-    diagnosisResult: buildDiagnosisAdapter(parsed, messageText, nextBestCheck, followUpQuestion)
+    diagnosisResult: buildDiagnosisAdapter(
+      parsed,
+      messageText,
+      nextBestCheck,
+      followUpQuestion,
+      missingInfo
+    )
   };
 }
 
-function buildQuickPrompts(nextStep, followUpQuestion) {
-  return [nextStep, followUpQuestion].filter(
-    (value) => typeof value === "string" && value.trim().length > 0
-  );
+function normalizeQuickPrompts(prompts, nextStep, followUpQuestion) {
+  if (Array.isArray(prompts) && prompts.length > 0) {
+    return prompts.slice(0, 4).map(String);
+  }
+
+  return buildQuestionChips(followUpQuestion, nextStep);
 }
 
-function buildDiagnosisAdapter(parsed, messageText, nextStep, followUpQuestion) {
+function buildQuestionChips(question, nextStep) {
+  const text = `${question || ""} ${nextStep || ""}`.toLowerCase();
+
+  if (/\b(condenser fan|fan running|fan)\b/.test(text)) {
+    return ["Yes", "No", "Fan only", "Not sure"];
+  }
+
+  if (/\b(outdoor unit|outdoor section)\b/.test(text)) {
+    return ["Yes", "No", "Fan only", "Not sure"];
+  }
+
+  if (/\bcompressor\b/.test(text)) {
+    return ["Running", "Humming", "Off", "Not sure"];
+  }
+
+  if (/\b(suction pressure|pressure)\b/.test(text)) {
+    return ["Add suction pressure"];
+  }
+
+  if (/\b(liquid|head pressure)\b/.test(text)) {
+    return ["Add liquid pressure"];
+  }
+
+  if (/\bambient|outdoor temp\b/.test(text)) {
+    return ["Add outdoor ambient"];
+  }
+
+  if (/\breturn|supply\b/.test(text)) {
+    return ["Add return/supply temp"];
+  }
+
+  if (/\bfilter\b/.test(text)) {
+    return ["Clean", "Dirty", "Restrictive", "Not sure"];
+  }
+
+  if (/\bblower\b/.test(text)) {
+    return ["Blower running", "Blower off", "Weak", "Not sure"];
+  }
+
+  return [nextStep].filter((value) => typeof value === "string" && value.trim().length > 0);
+}
+
+function buildDiagnosisAdapter(parsed, messageText, nextStep, followUpQuestion, missingInfo) {
   if (parsed.diagnosisResult) {
     return normalizeDiagnosisResult(parsed.diagnosisResult);
   }
@@ -266,7 +339,7 @@ function buildDiagnosisAdapter(parsed, messageText, nextStep, followUpQuestion) 
     nextSteps: [nextStep],
     whatWouldConfirm: [nextStep],
     whatWouldRuleOut: followUpQuestion ? [followUpQuestion] : [],
-    missingInfo: followUpQuestion ? [followUpQuestion] : [],
+    missingInfo,
     recommendedActions: [nextStep],
     estimatedRange: "Estimate unavailable"
   };
@@ -331,7 +404,8 @@ function logMissingFields(response) {
     "messageText",
     "confidence",
     "nextStep",
-    "followUpQuestion"
+    "nextBestQuestion",
+    "missingInfo"
   ].filter((field) => response[field] === undefined);
 
   if (missing.length > 0) {

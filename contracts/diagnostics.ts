@@ -50,6 +50,7 @@ export interface DiagnosticsCopilotResponse {
   nextBestCheck?: string;
   nextStep?: string;
   followUpQuestion?: string | null;
+  missingInfo?: string[];
   confidence?: number;
   cautions?: string[];
   diagnosisResult?: {
