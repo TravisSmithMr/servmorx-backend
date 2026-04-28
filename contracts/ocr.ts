@@ -14,5 +14,16 @@ export interface OcrExtractTextResponse {
   providerPath: OcrProviderPath;
   providerStatus: string;
   text: string;
+  equipment?: {
+    brand: string;
+    modelNumber: string;
+    serialNumber: string;
+    unitType: string;
+    type: string;
+    capacity: string;
+    estimatedAge: string;
+    confidence: number;
+    rawOcrText: string;
+  };
   usedFallback: boolean;
 }

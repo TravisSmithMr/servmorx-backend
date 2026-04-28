@@ -38,6 +38,7 @@ function buildSystemRole() {
 function buildContextBlock(context: DiagnosticsCopilotRequest['context']) {
   const issue = context?.selectedIssue ?? context?.issue ?? 'unknown';
   const equipment = context?.equipment ?? null;
+  const job = 'job' in context ? context.job : {};
   const followUpAnswers = 'followUpAnswers' in context ? context.followUpAnswers : {};
   const techNotes = 'techNotes' in context ? context.techNotes : [];
   const knownFacts = 'knownFacts' in context ? context.knownFacts : [];
@@ -62,6 +63,7 @@ function buildContextBlock(context: DiagnosticsCopilotRequest['context']) {
     `Diagnostic stage: ${diagnosticStage}`,
     `Issue: ${issue}`,
     `Equipment: ${JSON.stringify(equipment)}`,
+    `Job placeholders: ${JSON.stringify(job)}`,
     `Follow-up answers: ${JSON.stringify(followUpAnswers)}`,
     `Tech notes: ${JSON.stringify(techNotes)}`,
     `Current confidence: ${JSON.stringify(currentConfidence)}`,

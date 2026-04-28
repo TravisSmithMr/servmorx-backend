@@ -15,15 +15,44 @@ app.get("/health", (req, res) => {
 });
 
 app.post("/ocr/extract-text", async (req, res) => {
-  const hasKey = Boolean(process.env.OPENAI_API_KEY);
+  const payload = req.body || {};
+  const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY?.trim());
 
-  res.json({
-    provider: hasKey ? "backend-openai" : "missing-openai-key",
-    providerPath: "backend",
-    providerStatus: hasKey ? "configured" : "not_configured",
-    text: "",
-    usedFallback: !hasKey
-  });
+  console.log("[ocr/extract-text] route hit");
+  console.log(`[ocr/extract-text] OPENAI_API_KEY exists: ${hasOpenAIKey}`);
+
+  try {
+    const image = payload.image || {};
+    const text = await createServerVisionOcrResponse(image);
+    const equipment = parseEquipmentIdentity(text);
+
+    console.log("[ocr/extract-text] OCR success", {
+      brand: equipment.brand,
+      modelNumber: equipment.modelNumber,
+      serialNumber: equipment.serialNumber,
+      confidence: equipment.confidence
+    });
+
+    res.json({
+      provider: "openai",
+      providerPath: "backend",
+      providerStatus: "Equipment tag OCR complete.",
+      text,
+      equipment,
+      usedFallback: false
+    });
+  } catch (error) {
+    console.error("[ocr/extract-text] OCR failure:", error);
+    res.status(500).json({
+      provider: "backend",
+      providerPath: "backend",
+      providerStatus: "OCR failed. Manual equipment entry required.",
+      text: "",
+      equipment: parseEquipmentIdentity(""),
+      usedFallback: true,
+      error: true
+    });
+  }
 });
 
 app.post("/diagnostics/copilot", async (req, res) => {
@@ -125,6 +154,188 @@ async function createServerJsonResponse(prompt) {
   return JSON.parse(content);
 }
 
+async function createServerVisionOcrResponse(image) {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not configured.");
+  }
+
+  if (!image?.base64) {
+    throw new Error("OCR request is missing image.base64.");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
+  const mimeType = image.mimeType || "image/jpeg";
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    signal: controller.signal,
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an OCR engine for HVAC equipment data tags. Return only visible text. Preserve line breaks, model numbers, serial numbers, brand names, and labels. Do not infer specs."
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Read this HVAC equipment data tag. Return visible OCR text only."
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:${mimeType};base64,${image.base64}`,
+                detail: "high"
+              }
+            }
+          ]
+        }
+      ]
+    })
+  }).finally(() => clearTimeout(timeout));
+
+  if (!response.ok) {
+    throw new Error(`OpenAI OCR request failed: ${response.status} ${await response.text()}`);
+  }
+
+  const body = await response.json();
+  const content = body.choices?.[0]?.message?.content;
+
+  if (typeof content !== "string") {
+    throw new Error("OpenAI OCR returned no text.");
+  }
+
+  return content.trim();
+}
+
+function parseEquipmentIdentity(rawText) {
+  const text = typeof rawText === "string" ? rawText : "";
+  const normalized = text.replace(/\r/g, "\n");
+  const lines = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const brand = extractBrand(normalized);
+  const modelNumber = extractLabeledValue(lines, [
+    "model",
+    "model no",
+    "model number",
+    "mdl",
+    "m/n"
+  ]);
+  const serialNumber = extractLabeledValue(lines, [
+    "serial",
+    "serial no",
+    "serial number",
+    "ser",
+    "s/n"
+  ]);
+  const unitType = extractUnitType(normalized);
+  const presentFields = [brand, modelNumber, serialNumber, unitType].filter(Boolean).length;
+  const confidence = Math.max(0.1, Math.min(0.95, presentFields / 4));
+
+  return {
+    brand: brand || "",
+    modelNumber: modelNumber || "",
+    serialNumber: serialNumber || "",
+    unitType: unitType || "",
+    type: unitType || "",
+    capacity: "Unknown",
+    estimatedAge: "Unknown",
+    confidence,
+    rawOcrText: text
+  };
+}
+
+function extractBrand(text) {
+  const brands = [
+    "Trane",
+    "Carrier",
+    "Lennox",
+    "Goodman",
+    "Rheem",
+    "Ruud",
+    "York",
+    "American Standard",
+    "Bryant",
+    "Daikin",
+    "Amana",
+    "Tempstar",
+    "ICP",
+    "Payne",
+    "Mitsubishi",
+    "Bosch"
+  ];
+  const lowerText = text.toLowerCase();
+
+  return brands.find((brand) => lowerText.includes(brand.toLowerCase())) || "";
+}
+
+function extractLabeledValue(lines, labels) {
+  for (const line of lines) {
+    const compactLine = line.replace(/\s+/g, " ");
+
+    for (const label of labels) {
+      const pattern = new RegExp(`\\b${escapeRegex(label)}\\b\\s*(?:#|no\\.?|number|:|-)?\\s*([A-Z0-9][A-Z0-9_.\\-/]{2,})`, "i");
+      const match = compactLine.match(pattern);
+
+      if (match?.[1]) {
+        return cleanEquipmentToken(match[1]);
+      }
+    }
+  }
+
+  return "";
+}
+
+function extractUnitType(text) {
+  const lowerText = text.toLowerCase();
+
+  if (lowerText.includes("package unit") || lowerText.includes("packaged unit")) {
+    return "Package Unit";
+  }
+
+  if (lowerText.includes("split system") || lowerText.includes("split-system")) {
+    return "Split System";
+  }
+
+  if (lowerText.includes("heat pump")) {
+    return "Heat Pump";
+  }
+
+  if (lowerText.includes("air conditioner") || lowerText.includes("condensing unit")) {
+    return "Air Conditioner";
+  }
+
+  if (lowerText.includes("furnace")) {
+    return "Furnace";
+  }
+
+  if (lowerText.includes("air handler")) {
+    return "Air Handler";
+  }
+
+  return "";
+}
+
+function cleanEquipmentToken(value) {
+  return value.replace(/^[#:\-\s]+/, "").replace(/[,\s;]+$/, "").trim();
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function buildCopilotPrompt(context) {
   return [
     buildSystemRole(),
@@ -148,6 +359,7 @@ function buildSystemRole() {
 function buildContextBlock(context) {
   const issue = context?.selectedIssue || context?.issue || "unknown";
   const equipment = context?.equipment || null;
+  const job = context?.job || {};
   const followUpAnswers = context?.followUpAnswers || {};
   const techNotes = Array.isArray(context?.techNotes) ? context.techNotes : [];
   const knownFacts = Array.isArray(context?.knownFacts) ? context.knownFacts : [];
@@ -175,6 +387,7 @@ function buildContextBlock(context) {
     `Diagnostic stage: ${diagnosticStage}`,
     `Issue: ${issue}`,
     `Equipment: ${JSON.stringify(equipment)}`,
+    `Job placeholders: ${JSON.stringify(job)}`,
     `Follow-up answers: ${JSON.stringify(followUpAnswers)}`,
     `Tech notes: ${JSON.stringify(techNotes)}`,
     `Current confidence: ${JSON.stringify(currentConfidence)}`,

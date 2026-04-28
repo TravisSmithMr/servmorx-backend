@@ -43,6 +43,12 @@ export interface DiagnosticsContextPayload {
   measurementValues?: Record<string, number>;
   route: string | null;
   equipment: DiagnosticsEquipmentContext;
+  job?: {
+    customerName?: string;
+    jobId?: string;
+    location?: string;
+    equipmentId?: string;
+  };
   followUpAnswers?: Record<string, unknown>;
   techNotes?: string[];
   knownFacts?: string[];
