@@ -40,6 +40,19 @@ export interface DiagnosticsCopilotResponse {
   insight: string;
   quickPrompts: string[];
   messageText: string;
+  diagnosisResult?: {
+    mostLikely: {
+      label: string;
+      confidence: number;
+    };
+    secondary: Array<{
+      label: string;
+      confidence: number;
+    }>;
+    confidenceLabel: 'High' | 'Medium' | 'Low';
+    recommendedActions?: string[];
+    estimatedRange?: string;
+  };
   error?: boolean;
 }
 

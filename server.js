@@ -129,11 +129,14 @@ function buildCopilotPrompt(context, message) {
     "You are SERVMORX TECH, an AI HVAC diagnostic copilot for field technicians.",
     "All reasoning must come from the supplied diagnostic context. Do not invent readings.",
     "Sound like an experienced field tech: practical, concise, grounded, and focused on narrowing causes.",
-    "Return strict JSON only with keys: provider, messageText, insight, quickPrompts.",
+    "Return strict JSON only with keys: provider, messageText, insight, quickPrompts, diagnosisResult.",
     'provider must be exactly "openai".',
     "insight must be a short string the app can display.",
     "messageText: 2-4 short sentences max. Include what the evidence points toward and the next check.",
     "quickPrompts: 0-3 short technician prompts.",
+    "If stage is Diagnosis or Result, or if issue and follow-up answers are present, include diagnosisResult.",
+    "diagnosisResult shape: { mostLikely: { label, confidence }, secondary: [{ label, confidence }], confidenceLabel, recommendedActions, estimatedRange }.",
+    "Use confidence as 0-100. confidenceLabel must be High, Medium, or Low. recommendedActions must be 3-4 practical repair/check steps. estimatedRange can be Estimate unavailable.",
     "",
     `Issue: ${issue}`,
     `Equipment: ${JSON.stringify(equipment)}`,
@@ -155,6 +158,47 @@ function normalizeCopilotResponse(parsed) {
     messageText:
       typeof parsed.messageText === "string"
         ? parsed.messageText
-        : "Backend AI returned no reasoning text."
+        : "Backend AI returned no reasoning text.",
+    diagnosisResult: normalizeDiagnosisResult(parsed.diagnosisResult)
   };
+}
+
+function normalizeDiagnosisResult(value) {
+  if (!value || typeof value !== "object" || !value.mostLikely) {
+    return undefined;
+  }
+
+  return {
+    mostLikely: {
+      label: String(value.mostLikely.label || "AI diagnosis"),
+      confidence: clampConfidence(value.mostLikely.confidence)
+    },
+    secondary: Array.isArray(value.secondary)
+      ? value.secondary.slice(0, 3).map((cause) => ({
+          label: String(cause.label || "Secondary cause"),
+          confidence: clampConfidence(cause.confidence)
+        }))
+      : [],
+    confidenceLabel:
+      value.confidenceLabel === "High" ||
+      value.confidenceLabel === "Medium" ||
+      value.confidenceLabel === "Low"
+        ? value.confidenceLabel
+        : "Medium",
+    recommendedActions: Array.isArray(value.recommendedActions)
+      ? value.recommendedActions.slice(0, 4).map(String)
+      : [],
+    estimatedRange:
+      typeof value.estimatedRange === "string" ? value.estimatedRange : "Estimate unavailable"
+  };
+}
+
+function clampConfidence(value) {
+  const numeric = Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(numeric)));
 }

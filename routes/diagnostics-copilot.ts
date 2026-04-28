@@ -29,10 +29,13 @@ function buildCopilotPrompt(request: DiagnosticsCopilotRequest) {
     'Keep messageText to 2-4 short sentences. No paragraphs. No filler.',
     'Avoid generic language: "it depends", "various factors", "could be anything", "several things".',
     'Use grounded language: "points toward", "likely", "worth checking next".',
-    'Return strict JSON with keys: provider, insight, quickPrompts, messageText.',
+    'Return strict JSON with keys: provider, insight, quickPrompts, messageText, diagnosisResult.',
     'provider must be exactly "openai".',
     'insight must be a short string the app can display.',
     'quickPrompts should be 0-3 short field checks, not generic chat suggestions.',
+    'If stage is Diagnosis or Result, or if issue and follow-up answers are present, include diagnosisResult.',
+    'diagnosisResult shape: { mostLikely: { label, confidence }, secondary: [{ label, confidence }], confidenceLabel, recommendedActions, estimatedRange }.',
+    'Use confidence as 0-100. confidenceLabel must be High, Medium, or Low. recommendedActions must be 3-4 practical repair/check steps. estimatedRange can be Estimate unavailable.',
     '',
     `User message: ${request.message ?? 'Passive update only.'}`,
     `Issue: ${issue}`,
@@ -70,6 +73,7 @@ export async function handleDiagnosticsCopilot(
         typeof parsed.messageText === 'string'
           ? parsed.messageText
           : 'Backend AI returned no reasoning text.',
+      diagnosisResult: normalizeDiagnosisResult(parsed.diagnosisResult),
     };
   } catch (error) {
     console.error('[diagnostics/copilot] OpenAI response failure:', error);
@@ -82,4 +86,54 @@ export async function handleDiagnosticsCopilot(
       messageText: 'AI request failed',
     };
   }
+}
+
+function normalizeDiagnosisResult(value: unknown) {
+  if (!value || typeof value !== 'object' || !('mostLikely' in value)) {
+    return undefined;
+  }
+
+  const result = value as {
+    mostLikely?: { label?: unknown; confidence?: unknown };
+    secondary?: Array<{ label?: unknown; confidence?: unknown }>;
+    confidenceLabel?: unknown;
+    recommendedActions?: unknown[];
+    estimatedRange?: unknown;
+  };
+
+  return {
+    mostLikely: {
+      label: String(result.mostLikely?.label || 'AI diagnosis'),
+      confidence: clampConfidence(result.mostLikely?.confidence),
+    },
+    secondary: Array.isArray(result.secondary)
+      ? result.secondary.slice(0, 3).map((cause) => ({
+          label: String(cause.label || 'Secondary cause'),
+          confidence: clampConfidence(cause.confidence),
+        }))
+      : [],
+    confidenceLabel:
+      result.confidenceLabel === 'High' ||
+      result.confidenceLabel === 'Medium' ||
+      result.confidenceLabel === 'Low'
+        ? result.confidenceLabel
+        : 'Medium',
+    recommendedActions: Array.isArray(result.recommendedActions)
+      ? result.recommendedActions.slice(0, 4).map(String)
+      : [],
+    estimatedRange:
+      typeof result.estimatedRange === 'string'
+        ? result.estimatedRange
+        : 'Estimate unavailable',
+  };
+}
+
+function clampConfidence(value: unknown) {
+  const numeric = Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(numeric)));
 }
