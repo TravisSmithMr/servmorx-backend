@@ -67,7 +67,10 @@ app.listen(PORT, "0.0.0.0", () => {
 
 async function createCopilotAiResponse(payload) {
   const context = payload.context || {};
+  console.log("[diagnostics/copilot] AI context:", JSON.stringify(context));
   const rawJson = await createServerJsonResponse(buildCopilotPrompt(context, payload.message));
+  console.log("[diagnostics/copilot] AI response JSON:", JSON.stringify(rawJson));
+  logMissingFields(rawJson);
   return normalizeCopilotResponse(rawJson);
 }
 
@@ -94,8 +97,7 @@ async function createServerJsonResponse(prompt) {
       messages: [
         {
           role: "system",
-          content:
-            "You are SERVMORX TECH, an AI HVAC diagnostic copilot for field technicians. Return valid JSON only."
+          content: buildSystemPrompt()
         },
         {
           role: "user",
@@ -120,28 +122,39 @@ async function createServerJsonResponse(prompt) {
 }
 
 function buildCopilotPrompt(context, message) {
-  const issue = context?.issue || "unknown";
+  const issue = context?.selectedIssue || context?.issue || "unknown";
   const equipment = context?.equipment || null;
   const followUpAnswers = context?.followUpAnswers || {};
   const techNotes = Array.isArray(context?.techNotes) ? context.techNotes : [];
+  const knownFacts = Array.isArray(context?.knownFacts) ? context.knownFacts : [];
+  const unknowns = Array.isArray(context?.unknowns) ? context.unknowns : [];
+  const contradictions = Array.isArray(context?.contradictions) ? context.contradictions : [];
+  const currentStage = context?.currentStage || context?.stage || "unknown";
 
   return [
-    "You are SERVMORX TECH, an AI HVAC diagnostic copilot for field technicians.",
-    "All reasoning must come from the supplied diagnostic context. Do not invent readings.",
-    "Sound like an experienced field tech: practical, concise, grounded, and focused on narrowing causes.",
-    "Return strict JSON only with keys: provider, messageText, insight, quickPrompts, diagnosisResult.",
+    "Build the next SERVMORX TECH diagnostic response from this context.",
+    "Reason from knownFacts first. Treat unknowns as missing data, not evidence.",
+    "If there is not enough confirmed data, use this wording in messageText: Not enough confirmed data yet. Based on what we know, I'd check ___ next.",
+    "Return strict JSON only. No markdown. No prose outside JSON.",
+    "Required top-level shape:",
+    "{ provider, insight, messageText, reasoningSummary, nextBestQuestion, nextBestCheck, confidence, cautions, quickPrompts, diagnosisResult }",
     'provider must be exactly "openai".',
-    "insight must be a short string the app can display.",
-    "messageText: 2-4 short sentences max. Include what the evidence points toward and the next check.",
-    "quickPrompts: 0-3 short technician prompts.",
-    "If stage is Diagnosis or Result, or if issue and follow-up answers are present, include diagnosisResult.",
-    "diagnosisResult shape: { mostLikely: { label, confidence }, secondary: [{ label, confidence }], confidenceLabel, recommendedActions, estimatedRange }.",
-    "Use confidence as 0-100. confidenceLabel must be High, Medium, or Low. recommendedActions must be 3-4 practical repair/check steps. estimatedRange can be Estimate unavailable.",
+    "confidence must be Low, Medium, or High.",
+    "messageText must be 2-4 short sentences.",
+    "quickPrompts must be 0-3 short field checks.",
+    "cautions must list unsupported claims or safety cautions, if any.",
+    "For Diagnosis or Result, include diagnosisResult. If evidence is weak, keep confidence low and missingInfo populated.",
+    "diagnosisResult shape: { mostLikely: { label, confidence }, confidence, secondary: [{ label, confidence }], reasoning, nextSteps, whatWouldConfirm, whatWouldRuleOut, missingInfo, confidenceLabel, recommendedActions, estimatedRange }.",
+    "recommendedActions should mirror the practical nextSteps so the existing app repair screen can display them.",
     "",
+    `Current stage: ${currentStage}`,
     `Issue: ${issue}`,
     `Equipment: ${JSON.stringify(equipment)}`,
     `Follow-up answers: ${JSON.stringify(followUpAnswers)}`,
     `Tech notes: ${JSON.stringify(techNotes)}`,
+    `Known facts: ${JSON.stringify(knownFacts)}`,
+    `Unknowns: ${JSON.stringify(unknowns)}`,
+    `Contradictions: ${JSON.stringify(contradictions)}`,
     "",
     "Diagnostic context JSON:",
     JSON.stringify(context || {}, null, 2),
@@ -150,15 +163,51 @@ function buildCopilotPrompt(context, message) {
   ].join("\n");
 }
 
+function buildSystemPrompt() {
+  return [
+    "You are SERVMORX TECH, a senior HVAC service technician assisting another tech in the field.",
+    "Do not act like customer support. Do not over-explain basic HVAC concepts.",
+    "Do not guess from one symptom. Separate confirmed facts from assumptions.",
+    "Prioritize live field observations, measurements, and technician notes over common failures.",
+    "Never say a part is bad without naming the confirming check.",
+    "When confidence is low, ask one sharp next question and give one next best field check.",
+    "Every response must include nextBestCheck.",
+    "Use likely path language, not absolute diagnosis language.",
+    "HVAC reasoning rules:",
+    "- No cooling plus fan only does not automatically mean bad compressor.",
+    "- Fan running with compressor off should first separate capacitor, compressor overload, contactor/output, and safety/control path.",
+    "- Low charge should not be suggested strongly without pressure/temp evidence or icing behavior.",
+    "- Airflow issues should be considered before charge when airflow symptoms exist.",
+    "- Electrical/control issues should be checked before condemning major components.",
+    "- Check capacitor MFD before condemning compressor when start/run behavior points electrical.",
+    "- Verify 24V at the contactor coil before assuming an outdoor unit component has failed.",
+    "- Confirm compressor amp draw before leaning into compressor mechanical failure.",
+    "Return valid JSON only."
+  ].join("\n");
+}
+
 function normalizeCopilotResponse(parsed) {
+  const messageText =
+    typeof parsed.messageText === "string"
+      ? parsed.messageText
+      : "Not enough confirmed data yet. Based on what we know, I'd check the next field measurement.";
+  const nextBestCheck =
+    typeof parsed.nextBestCheck === "string"
+      ? parsed.nextBestCheck
+      : "Confirm the next live field measurement before ranking causes.";
+
   return {
     provider: "openai",
     insight: typeof parsed.insight === "string" ? parsed.insight : "",
     quickPrompts: Array.isArray(parsed.quickPrompts) ? parsed.quickPrompts : [],
-    messageText:
-      typeof parsed.messageText === "string"
-        ? parsed.messageText
-        : "Backend AI returned no reasoning text.",
+    messageText,
+    reasoningSummary:
+      typeof parsed.reasoningSummary === "string" ? parsed.reasoningSummary : "",
+    nextBestQuestion:
+      typeof parsed.nextBestQuestion === "string" ? parsed.nextBestQuestion : "",
+    nextBestCheck,
+    confidence: normalizeConfidenceLabel(parsed.confidence),
+    cautions: Array.isArray(parsed.cautions) ? parsed.cautions.map(String).slice(0, 3) : [],
     diagnosisResult: normalizeDiagnosisResult(parsed.diagnosisResult)
   };
 }
@@ -173,6 +222,7 @@ function normalizeDiagnosisResult(value) {
       label: String(value.mostLikely.label || "AI diagnosis"),
       confidence: clampConfidence(value.mostLikely.confidence)
     },
+    confidence: clampConfidence(value.confidence ?? value.mostLikely.confidence),
     secondary: Array.isArray(value.secondary)
       ? value.secondary.slice(0, 3).map((cause) => ({
           label: String(cause.label || "Secondary cause"),
@@ -185,12 +235,29 @@ function normalizeDiagnosisResult(value) {
       value.confidenceLabel === "Low"
         ? value.confidenceLabel
         : "Medium",
+    reasoning: typeof value.reasoning === "string" ? value.reasoning : "",
+    nextSteps: Array.isArray(value.nextSteps) ? value.nextSteps.slice(0, 4).map(String) : [],
+    whatWouldConfirm: Array.isArray(value.whatWouldConfirm)
+      ? value.whatWouldConfirm.slice(0, 4).map(String)
+      : [],
+    whatWouldRuleOut: Array.isArray(value.whatWouldRuleOut)
+      ? value.whatWouldRuleOut.slice(0, 4).map(String)
+      : [],
+    missingInfo: Array.isArray(value.missingInfo)
+      ? value.missingInfo.slice(0, 4).map(String)
+      : [],
     recommendedActions: Array.isArray(value.recommendedActions)
       ? value.recommendedActions.slice(0, 4).map(String)
-      : [],
+      : Array.isArray(value.nextSteps)
+        ? value.nextSteps.slice(0, 4).map(String)
+        : [],
     estimatedRange:
       typeof value.estimatedRange === "string" ? value.estimatedRange : "Estimate unavailable"
   };
+}
+
+function normalizeConfidenceLabel(value) {
+  return value === "High" || value === "Medium" || value === "Low" ? value : "Low";
 }
 
 function clampConfidence(value) {
@@ -201,4 +268,37 @@ function clampConfidence(value) {
   }
 
   return Math.max(0, Math.min(100, Math.round(numeric)));
+}
+
+function logMissingFields(response) {
+  const missing = [
+    "messageText",
+    "reasoningSummary",
+    "nextBestQuestion",
+    "nextBestCheck",
+    "confidence",
+    "cautions",
+    "quickPrompts"
+  ].filter((field) => response[field] === undefined);
+
+  if (missing.length > 0) {
+    console.log("[diagnostics/copilot] missing AI fields:", missing.join(", "));
+  }
+
+  if (response.diagnosisResult) {
+    const diagnosisMissing = [
+      "mostLikely",
+      "confidence",
+      "secondary",
+      "reasoning",
+      "nextSteps",
+      "whatWouldConfirm",
+      "whatWouldRuleOut",
+      "missingInfo"
+    ].filter((field) => response.diagnosisResult[field] === undefined);
+
+    if (diagnosisMissing.length > 0) {
+      console.log("[diagnostics/copilot] missing diagnosis fields:", diagnosisMissing.join(", "));
+    }
+  }
 }

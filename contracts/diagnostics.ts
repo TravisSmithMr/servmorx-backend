@@ -14,11 +14,15 @@ export interface DiagnosticsEquipmentContext {
 
 export interface DiagnosticsContextPayload {
   issue: string | null;
+  selectedIssue?: string | null;
   stage?: string | null;
+  currentStage?: string | null;
   route: string | null;
   equipment: DiagnosticsEquipmentContext;
   followUpAnswers?: Record<string, unknown>;
   techNotes?: string[];
+  knownFacts?: string[];
+  unknowns?: string[];
   gateAnswers: Record<string, unknown>;
   diagAnswers: Record<string, unknown>;
   likelyCauses: DiagnosticCause[];
@@ -40,15 +44,26 @@ export interface DiagnosticsCopilotResponse {
   insight: string;
   quickPrompts: string[];
   messageText: string;
+  reasoningSummary?: string;
+  nextBestQuestion?: string;
+  nextBestCheck?: string;
+  confidence?: 'High' | 'Medium' | 'Low';
+  cautions?: string[];
   diagnosisResult?: {
     mostLikely: {
       label: string;
       confidence: number;
     };
+    confidence?: number;
     secondary: Array<{
       label: string;
       confidence: number;
     }>;
+    reasoning?: string;
+    nextSteps?: string[];
+    whatWouldConfirm?: string[];
+    whatWouldRuleOut?: string[];
+    missingInfo?: string[];
     confidenceLabel: 'High' | 'Medium' | 'Low';
     recommendedActions?: string[];
     estimatedRange?: string;
