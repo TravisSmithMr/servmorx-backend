@@ -41,6 +41,7 @@ export interface DiagnosticsContextPayload {
   answeredQuestions?: Record<string, unknown>;
   currentQuestionId?: string | null;
   measurementValues?: Record<string, number>;
+  measurements?: Record<string, unknown>;
   route: string | null;
   equipment: DiagnosticsEquipmentContext;
   job?: {

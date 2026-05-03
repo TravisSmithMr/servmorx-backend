@@ -130,7 +130,7 @@ async function createServerJsonResponse(prompt) {
         {
           role: "system",
           content:
-            "You are a senior HVAC service technician. You diagnose systems based on real field observations. You do not guess without evidence. You prioritize confirming tests before conclusions. Return valid JSON only."
+            "You are a senior HVAC service technician. Prioritize confirmed field facts over unknowns, follow operation state before electrical/control before airflow before refrigeration, avoid repeated questions, and return valid JSON only."
         },
         {
           role: "user",
@@ -540,10 +540,11 @@ function buildCopilotPrompt(context) {
 function buildSystemRole() {
   return [
     "SYSTEM ROLE",
-    "You are a senior HVAC service technician.",
-    "You diagnose systems based on real field observations.",
-    "You do not guess without evidence.",
-    "You prioritize confirming tests before conclusions."
+    "You are a senior HVAC service technician guiding another tech in the field.",
+    "Think from confirmed field observations first, not from a generic checklist.",
+    "Known facts override unknowns.",
+    "Unknowns are only useful when they separate the remaining likely diagnostic paths.",
+    "You do not guess without evidence, and you do not condemn major parts without confirmation."
   ].join("\n");
 }
 
@@ -565,6 +566,7 @@ function buildContextBlock(context) {
     : [];
   const currentQuestionId = context?.currentQuestionId || null;
   const measurementValues = context?.measurementValues || {};
+  const measurements = context?.measurements || {};
   const currentConfidence =
     typeof context?.currentConfidence === "number" ? context.currentConfidence : null;
   const likelyPath = context?.likelyPath || "unknown";
@@ -591,6 +593,7 @@ function buildContextBlock(context) {
     `Candidate questions for this stage: ${JSON.stringify(candidateQuestions)}`,
     `Current question id: ${JSON.stringify(currentQuestionId)}`,
     `Measurement values: ${JSON.stringify(measurementValues)}`,
+    `Measurements: ${JSON.stringify(measurements)}`,
     `Latest technician message: ${latestMessage}`
   ].join("\n");
 }
@@ -598,29 +601,23 @@ function buildContextBlock(context) {
 function buildDiagnosticRules() {
   return [
     "DIAGNOSTIC RULES",
-    "- This is a diagnostic state machine, not a chatbot.",
-    "- The app controls stage progression. You interpret evidence and choose/prioritize one candidate question inside the current diagnostic stage.",
-    "- Prefer nextQuestionId from Candidate questions for this stage. If none fit, return null and suggest the next stage.",
-    "- Never repeat a question id already present in Answered questions or Asked question ids.",
-    "- Do not assume refrigerant issues without pressure/temperature evidence.",
-    "- Separate airflow vs electrical vs refrigeration first.",
-    "- No cooling + fan only does not automatically mean bad compressor.",
-    "- Always suggest the next best test.",
-    "- Never condemn major components without confirmation.",
-    "- Low confidence means ask the next best question instead of ranking a cause.",
-    "- Medium confidence means give the likely path and ask a confirming question.",
-    "- High confidence means give the likely cause and the next confirming check.",
-    "- Ask only ONE question at a time.",
-    "- For Not Cooling with unknown outdoor operation, first ask whether the outdoor unit, compressor, or condenser fan is running.",
-    "- Not Cooling sequence: first separate indoor blower, outdoor unit, compressor, and condenser fan operation.",
-    "- If refrigeration path is plausible, ask for suction pressure, then head/liquid pressure, then outdoor ambient, then superheat or subcooling if available, then coil frozen/airflow condition.",
+    "- This is adaptive field reasoning, not a decision tree and not a generic chatbot.",
+    "- Maintain 2-4 live hypotheses, eliminate hypotheses contradicted by known facts, then ask the one question that best separates what remains.",
+    "- Apply this hierarchy in order: 1. system operation state, 2. electrical/control path, 3. airflow only when the system is operating, 4. refrigeration only when the compressor is running, 5. diagnosis, 6. repair recommendation.",
+    "- Known facts, follow-up answers, tech notes, and measurements are stronger than unknowns or candidate question ordering.",
+    "- Candidate questions are suggestions, not commands. Prefer a candidate only when it fits the best diagnostic separator. If the best field question is not in the candidates, still return the best nextQuestionId and question.",
+    "- Never repeat currentQuestionId, Previous questions asked, Asked question ids, or Answered questions unless the technician explicitly says the value changed.",
+    "- Ask only ONE question at a time unless answerType is groupedMeasurementSet for tightly related measurements.",
+    "- Do not assume refrigerant issues without pressure/temperature evidence and a running compressor.",
+    "- Do not ask airflow questions until operation state and electrical/control path allow airflow to matter.",
+    "- Do not ask refrigerant pressure, suggest charge, or suggest a frozen coil when the compressor is not running or compressor amps are 0.",
+    "- HARD RULE - FAN ONLY / COMPRESSOR OFF: If condenser fan is running and compressor is not running or compressor amps are 0, stay on the compressor electrical path. Ask capacitor_check or compressor_voltage next unless already answered; then ask overload, wiring, contactor/load-side voltage, or compressor terminal checks.",
+    "- In fan-only/compressor-off cases, likelyPath must be compressor electrical/control path and nextQuestionId must be capacitor_check or compressor_voltage unless both are already answered.",
+    "- SHORT CYCLING: Do not diagnose from runtime alone. First separate what shuts off, what keeps running, whether the contactor drops out or stays pulled in, amp behavior, and safeties.",
+    "- For Not Cooling with unknown outdoor operation, first separate indoor blower, outdoor unit, compressor, and condenser fan operation.",
+    "- If refrigeration path is actually plausible, ask for suction pressure, then head/liquid pressure, then outdoor ambient, then superheat or subcooling if available.",
     "- Prefer superheat and subcooling over raw suction/liquid line temperature unless the app is calculating SH/SC.",
-    "- If suction_pressure is already answered, acknowledge it and move to head_pressure or outdoor_ambient. Do not ask suction_pressure again.",
-    "- If only one pressure value is known, do not diagnose low refrigerant confidently.",
-    "- For airflow-related issues, ask blower running, filter restriction, or whether weak airflow is at all vents or one area.",
-    "- Do not ask questions already listed in Previous questions asked.",
-    "- Do not ask question ids already present in Answered questions or Asked question ids unless the user says the value changed.",
-    "- If answerType is groupedMeasurementSet, it may request a small set of related measurements; otherwise ask one question only."
+    "- If only one pressure value is known, do not diagnose low refrigerant confidently."
   ].join("\n");
 }
 
@@ -628,15 +625,19 @@ function buildTaskInstruction() {
   return [
     "TASK INSTRUCTION",
     "Based on this information:",
-    "- interpret the latest answer against the current diagnostic stage",
-    "- choose the single most useful next diagnostic question from Candidate questions for this stage",
-    "- suggest a stage only if the current stage has enough evidence or no useful candidates remain",
-    "- if evidence is insufficient, say so and ask the single next best diagnostic question",
-    "- if evidence is medium confidence, describe the likely path and ask one confirming question",
-    "- if evidence is high confidence, give the likely cause and the next confirming check",
-    "- suggest the next best diagnostic step",
+    "- summarize the known facts that control the path",
+    "- keep 2-4 possible hypotheses in mind, but do not list more than 2 in messageText",
+    "- eliminate generic branches contradicted by confirmed operation state",
+    "- choose the single most useful next diagnostic question, meaning the question that best separates remaining possibilities",
+    "- set missingInfo to only the information needed for the active path, not every unknown",
+    "- use nextQuestionId from Candidate questions when it fits; otherwise use the field-accurate id required by the evidence",
+    "- suggest a stage only if the current stage has enough evidence or no useful checks remain",
     "",
-    "Do not confidently rank causes when required data is missing.",
+    "Confidence rules:",
+    "- 0-35%: ask a broad separator and do not name a likely failed part.",
+    "- 36-65%: state the likely path and ask a confirming question.",
+    "- 66-85%: state a strong path and ask the final confirmation.",
+    "- 86-100%: use only with direct proof.",
     "Keep responses short: 2-4 sentences, no filler, no generic chatbot language, and sound like a field technician."
   ].join("\n");
 }
@@ -647,22 +648,20 @@ function buildOutputFormat() {
     "Return structured JSON only:",
     "{",
     '  "messageText": string,',
-    '  "interpretation": string,',
-    '  "nextQuestionId": "indoor_blower_status" | "outdoor_unit_status" | "compressor_status" | "condenser_fan_status" | "suction_pressure" | "head_pressure" | "outdoor_ambient" | "superheat" | "subcooling" | "coil_frozen" | "airflow_status" | "filter_status" | "vent_distribution" | "freeze_location" | "run_time" | "other_detail" | null,',
-    '  "nextQuestion": string | null,',
+    '  "reasoningSummary": string,',
     '  "confidence": number,',
-    '  "suggestedStage": "initial" | "operation_check" | "airflow_check" | "electrical_check" | "refrigeration_check" | "verification" | "diagnosis",',
     '  "likelyPath": string,',
     '  "nextBestQuestion": string | null,',
-    '  "answerType": "singleChoice" | "yesNo" | "numeric" | "freeText" | "groupedMeasurementSet",',
+    '  "nextQuestionId": "indoor_blower_status" | "outdoor_unit_status" | "compressor_status" | "condenser_fan_status" | "capacitor_check" | "compressor_voltage" | "compressor_overload" | "compressor_wiring" | "contactor_state" | "compressor_amps" | "suction_pressure" | "head_pressure" | "outdoor_ambient" | "superheat" | "subcooling" | "coil_frozen" | "airflow_status" | "filter_status" | "vent_distribution" | "freeze_location" | "run_time" | "safety_status" | "other_detail" | null,',
     '  "answerOptions": string[],',
     '  "missingInfo": string[],',
     '  "stopAndDiagnose": boolean',
     "}",
+    "You may also include legacy fields interpretation, nextQuestion, suggestedStage, and answerType for compatibility, but do not omit the fields above.",
     "confidence must be 0-100 based only on confirmed evidence.",
     "suggestedStage must be the current stage unless enough evidence supports moving forward.",
-    "If confidence is below 45, messageText must not name a likely failed part. It should say: Not enough confirmed data yet. Based on what we know, I'd check ___ next.",
-    "nextQuestion must match nextQuestionId and answerOptions must directly answer nextQuestion. Use [] for freeText or numeric unless short choices are useful."
+    "If confidence is below 36, messageText must not name a likely failed part.",
+    "nextBestQuestion must match nextQuestionId and answerOptions must directly answer nextBestQuestion. Use [] for freeText or numeric unless short choices are useful."
   ].join("\n");
 }
 
@@ -690,7 +689,7 @@ function normalizeCopilotResponse(parsed, context = {}) {
   const followUpQuestion = nextQuestion;
   const confidence = clampConfidence(parsed.confidence);
   const messageText =
-    confidence < 45
+    confidence < 36
       ? `Not enough confirmed data yet. Based on what we know, I'd check ${nextBestCheck} next.`
       : rawMessageText ||
         "Not enough confirmed data yet. Based on what we know, I'd check the next field measurement.";
@@ -707,15 +706,17 @@ function normalizeCopilotResponse(parsed, context = {}) {
   const answerType = normalizeAnswerType(parsed.answerType || candidateQuestion?.answerType);
   const interpretation =
     typeof parsed.interpretation === "string" ? parsed.interpretation : messageText;
+  const reasoningSummary =
+    typeof parsed.reasoningSummary === "string" ? parsed.reasoningSummary : interpretation;
   const suggestedStage = normalizeDiagnosticStage(parsed.suggestedStage);
 
-  return {
+  const normalized = {
     provider: "openai",
     insight: typeof parsed.insight === "string" ? parsed.insight : messageText,
     quickPrompts: answerOptions,
     messageText,
     interpretation,
-    reasoningSummary: interpretation,
+    reasoningSummary,
     nextQuestion: followUpQuestion || "",
     nextBestQuestion: followUpQuestion || "",
     nextQuestionId,
@@ -738,6 +739,113 @@ function normalizeCopilotResponse(parsed, context = {}) {
       missingInfo
     )
   };
+
+  return applyHardDiagnosticGuards(normalized, context);
+}
+
+function applyHardDiagnosticGuards(response, context = {}) {
+  if (!isFanOnlyCompressorOff(context)) {
+    return response;
+  }
+
+  const nextQuestionId = chooseUnaskedQuestionId(context, [
+    "capacitor_check",
+    "compressor_voltage",
+    "compressor_overload",
+    "compressor_wiring"
+  ]) || "compressor_voltage";
+  const nextBestQuestion = getElectricalQuestionText(nextQuestionId);
+  const answerOptions = getElectricalAnswerOptions(nextQuestionId);
+  const confidence = response.confidence > 0 ? Math.min(response.confidence, 65) : 55;
+  const messageText = [
+    "Condenser fan is running and the compressor is off or at 0 amps, so this stays on the compressor electrical path.",
+    `Two paths are still live: start circuit/capacitor vs voltage, overload, or wiring. ${nextBestQuestion}`
+  ].join(" ");
+
+  return {
+    ...response,
+    insight: messageText,
+    quickPrompts: answerOptions,
+    messageText,
+    interpretation: messageText,
+    reasoningSummary:
+      "Known outdoor fan operation with compressor off or 0 amps eliminates airflow and refrigeration checks for now; the next separator is in the compressor electrical/start circuit.",
+    nextQuestion: nextBestQuestion,
+    nextBestQuestion,
+    nextQuestionId,
+    followUpQuestion: nextBestQuestion,
+    likelyPath: "compressor electrical/control path",
+    answerType: "singleChoice",
+    answerOptions,
+    missingInfo: ["capacitor condition", "compressor terminal voltage", "overload/wiring status"],
+    nextBestCheck: nextBestQuestion,
+    nextStep: nextBestQuestion,
+    confidence,
+    suggestedStage: "electrical_check",
+    stopAndDiagnose: false
+  };
+}
+
+function isFanOnlyCompressorOff(context = {}) {
+  const signals = JSON.stringify({
+    followUpAnswers: context.followUpAnswers || {},
+    answeredQuestions: context.answeredQuestions || {},
+    knownFacts: context.knownFacts || [],
+    measurements: context.measurements || {},
+    measurementValues: context.measurementValues || {},
+    techNotes: context.techNotes || []
+  }).toLowerCase();
+  const fanRunning =
+    /(?:condenser|outdoor)[^{}\[\],.;]{0,50}fan[^{}\[\],.;]{0,50}(?:running|runs|on|operating)/.test(signals) ||
+    /fan[^{}\[\],.;]{0,50}(?:running|runs|on|operating)[^{}\[\],.;]{0,50}(?:condenser|outdoor)/.test(signals);
+  const compressorOff =
+    /compressor[^{}\[\],.;]{0,60}(?:not running|not_running|off|stopped|not on|0 amps|zero amps|0a)/.test(signals) ||
+    /compressor[^{}\[\],.;]{0,40}amps[^0-9-]{0,20}0(?:\.0+)?\b/.test(signals);
+
+  return fanRunning && compressorOff;
+}
+
+function chooseUnaskedQuestionId(context = {}, ids) {
+  const asked = new Set([
+    context.currentQuestionId,
+    ...(Array.isArray(context.askedQuestions) ? context.askedQuestions : []),
+    ...(Array.isArray(context.previousQuestionsAsked) ? context.previousQuestionsAsked : []),
+    ...Object.keys(context.answeredQuestions || {})
+  ].filter(Boolean));
+
+  return ids.find((id) => !asked.has(id));
+}
+
+function getElectricalQuestionText(questionId) {
+  if (questionId === "capacitor_check") {
+    return "Has the run capacitor been tested against its rated microfarads?";
+  }
+
+  if (questionId === "compressor_overload") {
+    return "Is the compressor overload open or is the compressor body too hot to reset?";
+  }
+
+  if (questionId === "compressor_wiring") {
+    return "Are the compressor terminal wires and plugs tight with no burned or open connection?";
+  }
+
+  return "Do you have proper voltage at the compressor terminals while the contactor is pulled in?";
+}
+
+function getElectricalAnswerOptions(questionId) {
+  if (questionId === "capacitor_check") {
+    return ["Within rating", "Weak/open", "Not checked yet"];
+  }
+
+  if (questionId === "compressor_overload") {
+    return ["Overload closed", "Overload open/hot", "Not checked yet"];
+  }
+
+  if (questionId === "compressor_wiring") {
+    return ["Connections good", "Loose/burned/open", "Not checked yet"];
+  }
+
+  return ["Rated voltage present", "No/low voltage", "Not checked yet"];
 }
 
 function normalizeQuestionId(value) {
@@ -746,6 +854,12 @@ function normalizeQuestionId(value) {
     "outdoor_unit_status",
     "compressor_status",
     "condenser_fan_status",
+    "capacitor_check",
+    "compressor_voltage",
+    "compressor_overload",
+    "compressor_wiring",
+    "contactor_state",
+    "compressor_amps",
     "suction_pressure",
     "head_pressure",
     "outdoor_ambient",
@@ -757,6 +871,7 @@ function normalizeQuestionId(value) {
     "vent_distribution",
     "freeze_location",
     "run_time",
+    "safety_status",
     "other_detail"
   ];
 
@@ -881,11 +996,14 @@ function clampConfidence(value) {
 function logMissingFields(response) {
   const missing = [
     "messageText",
-    "interpretation",
+    "reasoningSummary",
     "confidence",
     "nextQuestionId",
-    "nextQuestion",
-    "suggestedStage"
+    "likelyPath",
+    "nextBestQuestion",
+    "answerOptions",
+    "missingInfo",
+    "stopAndDiagnose"
   ].filter((field) => response[field] === undefined);
 
   if (missing.length > 0) {
