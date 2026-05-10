@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const { registerApiPlaceholderRoutes } = require("./routes/api-placeholder-routes");
 require("dotenv").config();
 
 const app = express();
@@ -7,11 +8,76 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
 
+registerApiPlaceholderRoutes(app);
+
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
     message: "SERVMORX backend is running"
   });
+});
+
+app.get("/api/health", (req, res) => {
+  const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY?.trim());
+
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    environment: process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV || "local",
+    mockMode: !hasOpenAIKey,
+    services: {
+      ocr: hasOpenAIKey ? "ready" : "mock",
+      copilot: hasOpenAIKey ? "ready" : "mock",
+      wireVision: "mock",
+      warranty: "mock"
+    }
+  });
+});
+
+app.post("/api/ocr/extract", async (req, res) => {
+  const payload = req.body || {};
+  const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY?.trim());
+
+  console.log("[api/ocr/extract] route hit");
+  console.log(`[api/ocr/extract] OPENAI_API_KEY exists: ${hasOpenAIKey}`);
+
+  if (!hasOpenAIKey) {
+    return res.json(buildMockOcrResponse("OpenAI key missing on backend. Returning safe mock OCR response."));
+  }
+
+  try {
+    const image = normalizeOcrImagePayload(payload);
+    const text = await createServerVisionOcrResponse(image);
+    const equipment = parseEquipmentIdentity(text);
+
+    res.json(buildOcrExtractionResponse(text, equipment, {
+      providerStatus: "Equipment tag OCR complete.",
+      usedFallback: false
+    }));
+  } catch (error) {
+    console.error("[api/ocr/extract] OCR failure:", error);
+    res.json(buildMockOcrResponse("OCR backend failed. Returning safe mock OCR response."));
+  }
+});
+
+app.post("/api/copilot/diagnose", async (req, res) => {
+  const payload = req.body || {};
+  const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY?.trim());
+
+  console.log("[api/copilot/diagnose] route hit");
+  console.log(`[api/copilot/diagnose] OPENAI_API_KEY exists: ${hasOpenAIKey}`);
+
+  if (!hasOpenAIKey) {
+    return res.json(buildMockCopilotResponse("OpenAI key missing on backend. Using offline guided diagnosis."));
+  }
+
+  try {
+    const response = await createCopilotAiResponse(payload);
+    res.json(response);
+  } catch (error) {
+    console.error("[api/copilot/diagnose] Copilot failure:", error);
+    res.json(buildMockCopilotResponse("Copilot backend failed. Using offline guided diagnosis."));
+  }
 });
 
 app.post("/ocr/extract-text", async (req, res) => {
@@ -216,6 +282,121 @@ async function createServerVisionOcrResponse(image) {
   }
 
   return content.trim();
+}
+
+function normalizeOcrImagePayload(payload) {
+  if (payload?.image?.base64) {
+    return payload.image;
+  }
+
+  return {
+    base64: payload?.imageBase64 || "",
+    imageURL: payload?.imageURL || null,
+    mimeType: payload?.image?.mimeType || "image/jpeg",
+    fileName: payload?.image?.fileName || "equipment-tag.jpg"
+  };
+}
+
+function buildMockOcrResponse(providerStatus) {
+  const text = [
+    "Carrier",
+    "MODEL 48TCED06A2A5A0A0",
+    "SERIAL 3025G18291",
+    "208/230V 3PH",
+    "R-410A",
+    "COMP RLA 14.1",
+    "FAN FLA 1.2"
+  ].join("\n");
+
+  return buildOcrExtractionResponse(text, parseEquipmentIdentity(text), {
+    provider: "mock",
+    providerStatus,
+    usedFallback: true
+  });
+}
+
+function buildOcrExtractionResponse(text, equipment, options = {}) {
+  const confidence = equipment?.confidence ?? 0;
+  const fieldConfidence = {
+    brand: confidence,
+    modelNumber: confidence,
+    serialNumber: confidence,
+    unitType: confidence,
+    voltage: confidence,
+    refrigerant: confidence,
+    compressorRLA: confidence,
+    fanFLA: confidence,
+    tonnage: confidence,
+    manufactureDate: confidence,
+    capacitorRating: confidence
+  };
+  const warnings = [];
+
+  if (options.usedFallback) {
+    warnings.push("Backend OCR used mock fallback. Technician verification required.");
+  }
+
+  if (confidence < 0.6) {
+    warnings.push("Low OCR confidence. Verify nameplate fields manually.");
+  }
+
+  if (options.providerStatus) {
+    warnings.push(options.providerStatus);
+  }
+
+  return {
+    provider: options.provider || "openai",
+    providerPath: "backend",
+    providerStatus: options.providerStatus || "Equipment tag OCR complete.",
+    usedFallback: Boolean(options.usedFallback),
+    mockMode: Boolean(options.usedFallback),
+    rawText: text,
+    text,
+    confidence,
+    parsedEquipment: {
+      brand: equipment?.brand || "",
+      modelNumber: equipment?.modelNumber || "",
+      serialNumber: equipment?.serialNumber || "",
+      unitType: equipment?.unitType || equipment?.type || "",
+      voltage: equipment?.electrical?.voltage || "",
+      refrigerant: equipment?.refrigeration?.refrigerantType || "",
+      compressorRLA: equipment?.electrical?.compressorRla || "",
+      fanFLA: equipment?.electrical?.fanMotorFla || "",
+      tonnage: equipment?.capacity || "",
+      manufactureDate: equipment?.buildDateEstimate || equipment?.estimatedAge || "",
+      capacitorRating: ""
+    },
+    fieldConfidence,
+    warnings,
+    equipment
+  };
+}
+
+function buildMockCopilotResponse(reason) {
+  return {
+    provider: "mock",
+    insight: "Using mock/offline diagnosis because the backend AI provider is unavailable.",
+    quickPrompts: [
+      "What should I meter first?",
+      "Explain the safest next check.",
+      "What would confirm this fault?"
+    ],
+    messageText:
+      "Mock/offline guidance active. Start with safe verification: confirm power is isolated before handling wiring, verify the call for cooling, then meter line voltage, 24V control voltage, and component-specific readings before replacing parts.",
+    interpretation: reason,
+    reasoningSummary:
+      "Backend returned a safe fallback response. Technician verification is required before acting on any AI guidance.",
+    nextBestCheck: "Verify voltage safely at the equipment before handling wiring.",
+    answerType: "freeText",
+    missingInfo: ["Live backend AI response"],
+    confidence: 0.54,
+    cautions: [
+      "Technician verification required.",
+      "Do not rely on AI output alone.",
+      "Use lockout/tagout and safe meter practices."
+    ],
+    error: false
+  };
 }
 
 function parseEquipmentIdentity(rawText) {
